@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Display a map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    #map {position: absolute; top: 0; right: 0; bottom: 0; left: 0;}
+  </style>
+</head>
+<body>
+  <div id="map">
+    <a href="https://www.maptiler.com" style="position:absolute;left:10px;bottom:10px;z-index:999;">
+      <img src="https://api.maptiler.com/resources/logo.svg" alt="MapTiler logo">
+    </a>
+  </div>
+  <p>
+    <a href="https://www.maptiler.com/copyright/" target="_blank">&copy; MapTiler</a>
+    <a href="https://www.openstreetmap.org/copyright" target="_blank">&copy; OpenStreetMap contributors</a>
+  </p>
+
+  <script>
+    const key = 't8QYIWtzHI91Rq2H10bQ';
+    var coords = [0.0, 0.0];  // Xojo replaces this
+
+    const map = L.map('map').setView(coords, 14);  // Fixed zoom on first load
+
+    L.tileLayer(`https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${key}`, {
+      tileSize: 512,
+      zoomOffset: -1,
+      minZoom: 1,
+      attribution: "<a href='https://www.maptiler.com/copyright/' target='_blank'>&copy; MapTiler</a> <a href='https://www.openstreetmap.org/copyright' target='_blank'>&copy; OpenStreetMap contributors</a>",
+      crossOrigin: true
+    }).addTo(map);
+
+    var trailCoords = [];  // ✅ Starts as empty — Xojo will replace this
+    var marker = null;
+    var polyline = L.polyline(trailCoords, { color: 'blue' }).addTo(map);
+
+    function updateMarker(lat, lon, alt) {
+      var newLatLng = new L.LatLng(lat, lon);
+
+      if (marker) {
+        marker.remove();  // Remove old marker if it exists
+      }
+
+      marker = L.marker(newLatLng).addTo(map);
+      marker.bindPopup("Lat: " + lat + "<br>Lon: " + lon + "<br>Alt: " + alt + " ft").openPopup();
+
+      map.setView(newLatLng, 14);
+
+      trailCoords.push([lat, lon]);
+
+      // ✅ Only draw trail if there are at least 2 points
+      if (trailCoords.length > 1) {
+        polyline.setLatLngs(trailCoords);
+      }
+    }
+
+    // Xojo inserts a call like this before </script>:
+    // updateMarker(46.9759, -109.8527, 135325);
+  </script>
+
+  <script>
+    let currentVersion = null;
+
+    async function checkForPageUpdate() {
+      try {
+        const res = await fetch('/version.json?cache=' + new Date().getTime());
+        const data = await res.json();
+
+        if (!currentVersion) {
+          currentVersion = data.version;
+        } else if (data.version !== currentVersion) {
+          console.log("New version detected! Reloading...");
+          location.reload(true);
+        }
+      } catch (err) {
+        console.error("Update check failed:", err);
+      }
+    }
+
+    setInterval(checkForPageUpdate, 5000); // Check every 5 seconds
+  </script>
+</body>
+</html>

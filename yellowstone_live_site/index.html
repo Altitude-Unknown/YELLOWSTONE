@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yellowstone Live Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .hud {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 1000;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid #d5d9df;
+      border-radius: 6px;
+      padding: 10px 12px;
+      min-width: 240px;
+      font: 14px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+    }
+    .hud strong { display: block; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="hud" id="hud">
+    <strong>Yellowstone</strong>
+    Waiting for telemetry
+  </div>
+  <script>
+    const map = L.map('map').setView([0, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let marker = null;
+    let trail = L.polyline([], {color: '#0b63ce', weight: 3}).addTo(map);
+    let firstFix = true;
+
+    async function refresh() {
+      try {
+        const response = await fetch('data.json?cache=' + Date.now());
+        const data = await response.json();
+        const latest = data.latest;
+        const points = (data.trail || []).filter(p => Number(p.gps_valid) === 1);
+        const latlngs = points.map(p => [Number(p.lat), Number(p.lon)]);
+        trail.setLatLngs(latlngs);
+
+        if (latest && Number(latest.gps_valid) === 1) {
+          const pos = [Number(latest.lat), Number(latest.lon)];
+          if (!marker) marker = L.marker(pos).addTo(map);
+          marker.setLatLng(pos);
+          marker.bindPopup(
+            `Lat: ${latest.lat}<br>Lon: ${latest.lon}<br>` +
+            `Alt: ${latest.alt_m} m<br>Speed: ${latest.speed_mph} mph<br>` +
+            `UTC: ${latest.date_utc} ${latest.time_utc}`
+          );
+          if (firstFix) {
+            map.setView(pos, 14);
+            firstFix = false;
+          } else {
+            map.panTo(pos, {animate: true});
+          }
+          document.getElementById('hud').innerHTML =
+            `<strong>Yellowstone</strong>` +
+            `Packet: ${latest.packet}<br>` +
+            `UTC: ${latest.date_utc} ${latest.time_utc}<br>` +
+            `Alt: ${latest.alt_m} m<br>` +
+            `Speed: ${latest.speed_mph} mph<br>` +
+            `Heading: ${latest.heading_deg}&deg;<br>` +
+            `RSSI: ${latest.rssi} dBm<br>` +
+            `Sats: ${latest.sats}`;
+        } else {
+          document.getElementById('hud').innerHTML =
+            `<strong>Yellowstone</strong>Waiting for valid GPS fix`;
+        }
+      } catch (err) {
+        document.getElementById('hud').innerHTML =
+          `<strong>Yellowstone</strong>Waiting for data`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

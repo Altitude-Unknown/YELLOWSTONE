@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime settings/data
+yellowstone_ground_station_settings.json
+yellowstone_live_site/data.json
+
+# Arduino / editor temporary files
+*.tmp
+*.bak
+
+# Logs
+*.log
