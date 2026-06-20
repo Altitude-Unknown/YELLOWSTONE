@@ -50,6 +50,14 @@ Additional hardware detail is kept in:
 HARDWARE.md
 ```
 
+## PCB Schematic
+
+The Yellowstone V2 schematic PDF is kept in this repo for quick reference:
+
+```text
+YELLOWSTONE-V2-Schematic.pdf
+```
+
 ## LoRa Settings
 
 Airborne and ground firmware both use:
