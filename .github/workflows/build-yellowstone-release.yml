@@ -59,6 +59,12 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
+          DETECTED_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*\"\\(Developer ID Application:.*\\)\"/\\1/p' | head -n 1)"
+          if [ -n "$DETECTED_IDENTITY" ]; then
+            echo "Detected signing identity: $DETECTED_IDENTITY"
+            echo "APPLE_DETECTED_SIGNING_IDENTITY=$DETECTED_IDENTITY" >> "$GITHUB_ENV"
+          fi
+
       - name: Build, sign, and notarize macOS app
         working-directory: ${{ env.WORKING_DIRECTORY }}
         env:
@@ -69,8 +75,10 @@ jobs:
         run: |
           pyinstaller --noconfirm --windowed --hidden-import serial.tools.list_ports --name "$APP_NAME" "$SCRIPT_NAME"
 
-          if [ -n "$APPLE_DEVELOPER_ID_APPLICATION" ]; then
-            codesign --force --deep --options runtime --timestamp --sign "$APPLE_DEVELOPER_ID_APPLICATION" "dist/$APP_NAME.app"
+          SIGNING_IDENTITY="${APPLE_DETECTED_SIGNING_IDENTITY:-$APPLE_DEVELOPER_ID_APPLICATION}"
+
+          if [ -n "$SIGNING_IDENTITY" ]; then
+            codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "dist/$APP_NAME.app"
           else
             codesign --force --deep --sign - "dist/$APP_NAME.app"
           fi
@@ -78,15 +86,15 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "dist/$APP_NAME.app"
 
           if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "../notary-submit-$MACOS_ARTIFACT_NAME.zip"
-            xcrun notarytool submit "../notary-submit-$MACOS_ARTIFACT_NAME.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+            ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "notary-submit-$MACOS_ARTIFACT_NAME.zip"
+            xcrun notarytool submit "notary-submit-$MACOS_ARTIFACT_NAME.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
             xcrun stapler staple "dist/$APP_NAME.app"
             xcrun stapler validate "dist/$APP_NAME.app"
           else
             echo "No notarization secrets found; skipping notarization."
           fi
 
-          ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "../$MACOS_ZIP_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "$MACOS_ZIP_NAME"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
@@ -116,7 +124,7 @@ jobs:
         working-directory: ${{ env.WORKING_DIRECTORY }}
         run: |
           pyinstaller --noconfirm --onefile --windowed --hidden-import serial.tools.list_ports --name "$env:APP_NAME" "$env:SCRIPT_NAME"
-          Compress-Archive -Path "dist/$env:APP_NAME.exe" -DestinationPath "../$env:WINDOWS_ZIP_NAME" -Force
+          Compress-Archive -Path "dist/$env:APP_NAME.exe" -DestinationPath "$env:WINDOWS_ZIP_NAME" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
