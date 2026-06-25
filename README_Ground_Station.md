@@ -8,7 +8,10 @@ For the full Yellowstone airborne, ground, and GUI operating manual, see [MANUAL
 
 - Reads Yellowstone CSV telemetry from the ground board serial port.
 - Shows a spreadsheet-style telemetry table.
-- Shows live telemetry summary values.
+- Shows live telemetry summary values in metric and imperial units.
+- Shows GPS altitude, pressure altitude, corrected pressure altitude, pressure,
+  temperature, and vertical speed.
+- Computes payload range and bearing from a user-entered launch location.
 - Generates a live Leaflet/OpenStreetMap page in `yellowstone_live_site`.
 - Can publish the map folder to Netlify using Netlify CLI settings.
 
@@ -17,7 +20,7 @@ For the full Yellowstone airborne, ground, and GUI operating manual, see [MANUAL
 Install Python 3 and then:
 
 ```bash
-cd "YELLOWSTONE"
+cd "YELLOWSTONE Project"
 python3 -m pip install -r requirements.txt
 python3 yellowstone_ground_station.py
 ```
@@ -29,10 +32,12 @@ On Windows, use `python` instead of `python3` if needed.
 The GUI expects the ground Yellowstone board to output:
 
 ```text
-lat,lon,alt_m,speed_mps,speed_mph,heading_deg,rssi,packet,date_utc,time_utc,fix_type,sats,gps_valid
+lat,lon,gps_alt_m,gps_alt_ft,ground_speed_mps,ground_speed_mph,vertical_speed_mps,vertical_speed_fpm,heading_deg,pressure_pa,pressure_hpa,pressure_inhg,pressure_alt_m,pressure_alt_ft,pressure_temp_c,pressure_temp_f,rssi,packet,date_utc,time_utc,fix_type,sats,gps_valid,pressure_valid
 ```
 
 Rows with `gps_valid` equal to `0` are shown in the table but are not added to the map trail.
+
+Pressure telemetry may still be valid when `gps_valid` is `0`.
 
 ## Netlify Publishing
 

@@ -2,7 +2,7 @@
 
 Living manual for the Yellowstone LoRa telemetry airborne unit, ground unit, and desktop GUI.
 
-Last updated: 2026-06-18
+Last updated: 2026-06-24
 
 ## System Overview
 
@@ -50,14 +50,6 @@ Additional hardware detail is kept in:
 HARDWARE.md
 ```
 
-## PCB Schematic
-
-The Yellowstone V2 schematic PDF is kept in this repo for quick reference:
-
-```text
-YELLOWSTONE-V2-Schematic.pdf
-```
-
 ## LoRa Settings
 
 Airborne and ground firmware both use:
@@ -79,17 +71,22 @@ Tx power: 23 dBm
 The binary LoRa payload includes:
 
 - Magic: `0x5953` (`YS`)
-- Version: `2`
+- Version: `3`
 - GPS valid flag
 - Latitude and longitude in degrees x `10^7`
-- Altitude in meters
+- GPS altitude in meters MSL
 - Ground speed in cm/s
 - Heading in tenths of a degree
+- Static pressure in pascals
+- ISA pressure altitude in meters
+- Pressure-altitude vertical speed in cm/s
+- Pressure-sensor temperature in centi-degrees C
 - UTC date/time fields
 - GPS fix type
 - Satellite count
 
-Ground firmware converts valid payloads to CSV.
+The LoRa payload uses compact metric/SI values. Airborne and ground CSV logs
+include both metric and US-standard conversions.
 
 ## Airborne Unit
 
@@ -97,10 +94,12 @@ Ground firmware converts valid payloads to CSV.
 
 - Initialize SD logging.
 - Initialize I2C GNSS.
+- Initialize the MS5x-compatible pressure sensor path and try I2C addresses
+  `0x76` then `0x77`.
 - Initialize RFM95 LoRa.
 - Read GNSS PVT data.
 - Transmit telemetry payload every `2000 ms`.
-- Log airborne telemetry to `AIRLOG.CSV` when SD is available.
+- Log airborne telemetry to `AIRLOG3.CSV` when SD is available.
 
 ### Airborne Startup Messages
 
@@ -110,6 +109,9 @@ Possible serial messages:
 Airborne SD logging ready
 Airborne SD not found; logging disabled
 GPS not found
+MS5x pressure sensor ready at 0x76
+MS5x pressure sensor ready at 0x77
+MS5x pressure sensor not found at 0x76 or 0x77; pressure telemetry disabled
 LoRa init failed
 LoRa ready: long-range mode
 ```
@@ -119,13 +121,13 @@ LoRa ready: long-range mode
 File:
 
 ```text
-AIRLOG.CSV
+AIRLOG3.CSV
 ```
 
 Columns:
 
 ```text
-lat,lon,alt_m,speed_mps,speed_mph,heading_deg,packet,date_utc,time_utc,fix_type,sats,gps_valid
+lat,lon,gps_alt_m,gps_alt_ft,ground_speed_mps,ground_speed_mph,vertical_speed_mps,vertical_speed_fpm,heading_deg,pressure_pa,pressure_hpa,pressure_inhg,pressure_alt_m,pressure_alt_ft,pressure_temp_c,pressure_temp_f,packet,date_utc,time_utc,fix_type,sats,gps_valid,pressure_valid
 ```
 
 ### Flashing Airborne Firmware
@@ -133,13 +135,13 @@ lat,lon,alt_m,speed_mps,speed_mph,heading_deg,packet,date_utc,time_utc,fix_type,
 Compile:
 
 ```bash
-arduino-cli compile --fqbn adafruit:samd:adafruit_feather_m0 "Airborne_YELLOWSTONE_dev"
+arduino-cli compile --fqbn adafruit:samd:adafruit_feather_m0 "YELLOWSTONE Project/Airborne_YELLOWSTONE_dev"
 ```
 
 Upload:
 
 ```bash
-arduino-cli upload -p /dev/cu.usbmodem1101 --fqbn adafruit:samd:adafruit_feather_m0 "Airborne_YELLOWSTONE_dev"
+arduino-cli upload -p /dev/cu.usbmodem1101 --fqbn adafruit:samd:adafruit_feather_m0 "YELLOWSTONE Project/Airborne_YELLOWSTONE_dev"
 ```
 
 ## Ground Unit
@@ -151,7 +153,7 @@ arduino-cli upload -p /dev/cu.usbmodem1101 --fqbn adafruit:samd:adafruit_feather
 - Receive binary telemetry payloads.
 - Reject payloads with bad size, magic, or version.
 - Print valid telemetry as CSV over USB serial.
-- Log valid telemetry to `GNDLOG.CSV` when SD is available.
+- Log valid telemetry to `GNDLOG3.CSV` when SD is available.
 
 ### Ground Startup Messages
 
@@ -171,17 +173,31 @@ LoRa ready: long-range mode
 The desktop GUI expects:
 
 ```text
-lat,lon,alt_m,speed_mps,speed_mph,heading_deg,rssi,packet,date_utc,time_utc,fix_type,sats,gps_valid
+lat,lon,gps_alt_m,gps_alt_ft,ground_speed_mps,ground_speed_mph,vertical_speed_mps,vertical_speed_fpm,heading_deg,pressure_pa,pressure_hpa,pressure_inhg,pressure_alt_m,pressure_alt_ft,pressure_temp_c,pressure_temp_f,rssi,packet,date_utc,time_utc,fix_type,sats,gps_valid,pressure_valid
 ```
 
 Rows with `gps_valid` set to `0` are shown in the table but are not added to the live map trail.
+
+The current desktop GUI understands the version-2 CSV schema. It must be
+updated before it can consume version-3 ground-station telemetry.
+
+### Pressure Telemetry Verification
+
+Pressure telemetry was verified end to end on `2026-06-24`:
+
+- The integrated airborne firmware reported live pressure, pressure altitude,
+  and pressure validity on the USB debug stream.
+- The ground firmware received those same values over LoRa and printed them in
+  the version-3 CSV stream.
+- During this bench test, pressure data was valid even when GPS had no lock,
+  so `pressure_valid` can be `1` while `gps_valid` is `0`.
 
 ### Ground SD Log
 
 File:
 
 ```text
-GNDLOG.CSV
+GNDLOG3.CSV
 ```
 
 The file uses the same CSV fields as the serial output.
@@ -191,13 +207,13 @@ The file uses the same CSV fields as the serial output.
 Compile:
 
 ```bash
-arduino-cli compile --fqbn adafruit:samd:adafruit_feather_m0 "Ground_YELLOWSTONE_dev"
+arduino-cli compile --fqbn adafruit:samd:adafruit_feather_m0 "YELLOWSTONE Project/Ground_YELLOWSTONE_dev"
 ```
 
 Upload:
 
 ```bash
-arduino-cli upload -p /dev/cu.usbmodem1101 --fqbn adafruit:samd:adafruit_feather_m0 "Ground_YELLOWSTONE_dev"
+arduino-cli upload -p /dev/cu.usbmodem1101 --fqbn adafruit:samd:adafruit_feather_m0 "YELLOWSTONE Project/Ground_YELLOWSTONE_dev"
 ```
 
 ## Desktop Ground Station GUI
@@ -224,7 +240,7 @@ yellowstone_ground_station.py
 Install dependencies:
 
 ```bash
-cd "YELLOWSTONE"
+cd "YELLOWSTONE Project"
 python3 -m pip install -r requirements.txt
 ```
 

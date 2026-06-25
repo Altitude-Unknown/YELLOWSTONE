@@ -46,6 +46,8 @@
         const response = await fetch('data.json?cache=' + Date.now());
         const data = await response.json();
         const latest = data.latest;
+        const display = data.latest_display || {};
+        const launch = data.launch_reference || {};
         const points = (data.trail || []).filter(p => Number(p.gps_valid) === 1);
         const latlngs = points.map(p => [Number(p.lat), Number(p.lon)]);
         trail.setLatLngs(latlngs);
@@ -56,7 +58,10 @@
           marker.setLatLng(pos);
           marker.bindPopup(
             `Lat: ${latest.lat}<br>Lon: ${latest.lon}<br>` +
-            `Alt: ${latest.alt_m} m<br>Speed: ${latest.speed_mph} mph<br>` +
+            `GPS Alt: ${latest.gps_alt_m} m / ${latest.gps_alt_ft} ft<br>` +
+            `Pressure Alt: ${latest.pressure_alt_m} m / ${latest.pressure_alt_ft} ft<br>` +
+            `Corrected Alt: ${Number(display.corrected_pressure_alt_m || 0).toFixed(0)} m / ${Number(display.corrected_pressure_alt_ft || 0).toFixed(1)} ft<br>` +
+            `Speed: ${latest.ground_speed_mps} m/s / ${latest.ground_speed_mph} mph<br>` +
             `UTC: ${latest.date_utc} ${latest.time_utc}`
           );
           if (firstFix) {
@@ -69,11 +74,18 @@
             `<strong>Yellowstone</strong>` +
             `Packet: ${latest.packet}<br>` +
             `UTC: ${latest.date_utc} ${latest.time_utc}<br>` +
-            `Alt: ${latest.alt_m} m<br>` +
-            `Speed: ${latest.speed_mph} mph<br>` +
+            `GPS Alt: ${latest.gps_alt_m} m / ${latest.gps_alt_ft} ft<br>` +
+            `Pressure Alt: ${latest.pressure_alt_m} m / ${latest.pressure_alt_ft} ft<br>` +
+            `Corrected Alt: ${Number(display.corrected_pressure_alt_m || 0).toFixed(0)} m / ${Number(display.corrected_pressure_alt_ft || 0).toFixed(1)} ft<br>` +
+            `Speed: ${latest.ground_speed_mps} m/s / ${latest.ground_speed_mph} mph<br>` +
+            `V/S: ${latest.vertical_speed_mps} m/s / ${latest.vertical_speed_fpm} fpm<br>` +
             `Heading: ${latest.heading_deg}&deg;<br>` +
+            `Pressure: ${latest.pressure_hpa} hPa / ${latest.pressure_inhg} inHg<br>` +
             `RSSI: ${latest.rssi} dBm<br>` +
-            `Sats: ${latest.sats}`;
+            `Sats: ${latest.sats}` +
+            ((display.distance_km !== null && display.distance_km !== undefined && launch.lat && launch.lon)
+              ? `<br>From ${launch.name || 'launch'}: ${Number(display.distance_nm).toFixed(2)} nm @ ${Number(display.bearing_deg_from_launch).toFixed(1)}&deg; / ${Number(display.distance_mi).toFixed(2)} mi / ${Number(display.distance_km).toFixed(2)} km`
+              : ``);
         } else {
           document.getElementById('hud').innerHTML =
             `<strong>Yellowstone</strong>Waiting for valid GPS fix`;
