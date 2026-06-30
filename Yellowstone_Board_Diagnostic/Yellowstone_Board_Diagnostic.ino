@@ -8,7 +8,6 @@
 #define RFM95_INT  3
 #define RFM95_RST  9
 #define SD_CS      10
-#define SD_ALT_CS  4
 #define RF95_FREQ  915.0
 
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
@@ -17,10 +16,8 @@ uint32_t diagnosticPass = 0;
 void setSpiDevicesDeselected() {
   pinMode(RFM95_CS, OUTPUT);
   pinMode(SD_CS, OUTPUT);
-  pinMode(SD_ALT_CS, OUTPUT);
   digitalWrite(RFM95_CS, HIGH);
   digitalWrite(SD_CS, HIGH);
-  digitalWrite(SD_ALT_CS, HIGH);
 }
 
 void resetLoRa() {
@@ -30,6 +27,12 @@ void resetLoRa() {
   digitalWrite(RFM95_RST, LOW);
   delay(10);
   digitalWrite(RFM95_RST, HIGH);
+  delay(10);
+}
+
+void holdLoRaInReset() {
+  pinMode(RFM95_RST, OUTPUT);
+  digitalWrite(RFM95_RST, LOW);
   delay(10);
 }
 
@@ -81,41 +84,46 @@ void scanI2c() {
   if (found == 0) Serial.println("  no I2C devices found");
 }
 
-void testSdOnCs(uint8_t csPin) {
+void testSd() {
+  Serial.println();
+  Serial.println("SD test:");
   Serial.print("  CS ");
-  Serial.print(csPin);
+  Serial.print(SD_CS);
   Serial.print(": ");
 
   digitalWrite(RFM95_CS, HIGH);
   digitalWrite(SD_CS, HIGH);
-  digitalWrite(SD_ALT_CS, HIGH);
+  holdLoRaInReset();
 
-  if (SD.begin(csPin)) {
-    Serial.println("SD.begin PASS");
-    File root = SD.open("/");
-    if (root) {
-      Serial.println("    SD root open: PASS");
-      root.close();
-    } else {
-      Serial.println("    SD root open: FAIL");
-    }
-  } else {
+  if (!SD.begin(SD_CS)) {
     Serial.println("SD.begin FAIL");
+    return;
   }
-}
 
-void testSd() {
-  Serial.println();
-  Serial.println("SD test:");
-  testSdOnCs(SD_CS);
-  testSdOnCs(SD_ALT_CS);
+  Serial.println("SD.begin PASS");
+
+  File testFile = SD.open("ysdiag.txt", FILE_WRITE);
+  if (testFile) {
+    testFile.println("yellowstone sd diagnostic");
+    testFile.close();
+    Serial.println("    write ysdiag.txt: PASS");
+  } else {
+    Serial.println("    write ysdiag.txt: FAIL");
+  }
+
+  testFile = SD.open("ysdiag.txt");
+  if (testFile) {
+    Serial.println("    read ysdiag.txt: PASS");
+    testFile.close();
+  } else {
+    Serial.println("    read ysdiag.txt: FAIL");
+  }
 }
 
 void testLoRa() {
   Serial.println();
   Serial.println("LoRa test:");
   digitalWrite(SD_CS, HIGH);
-  digitalWrite(SD_ALT_CS, HIGH);
   resetLoRa();
 
   if (!rf95.init()) {

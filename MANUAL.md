@@ -2,7 +2,7 @@
 
 Living manual for the Yellowstone LoRa telemetry airborne unit, ground unit, and desktop GUI.
 
-Last updated: 2026-06-24
+Last updated: 2026-06-25
 
 ## System Overview
 
@@ -192,6 +192,22 @@ Pressure telemetry was verified end to end on `2026-06-24`:
 - During this bench test, pressure data was valid even when GPS had no lock,
   so `pressure_valid` can be `1` while `gps_valid` is `0`.
 
+### 2026-06-25 Bench Verification
+
+During follow-up bench work on `2026-06-25`:
+
+- The airborne board transmitted live telemetry with pressure, pressure
+  altitude, pressure temperature, packet count, and vertical speed.
+- The ground board received those packets and printed valid version-3 CSV rows
+  with incrementing packet numbers.
+- The desktop GUI successfully connected to the ground board after all other
+  serial monitors were closed.
+- An immediate GUI disconnect after pressing `Connect` was traced to serial-port
+  contention, not a telemetry-format problem.
+
+During this bench test the airborne GPS still had no indoor lock, so the system
+was working even though GPS fields remained zero.
+
 ### Ground SD Log
 
 File:
@@ -258,6 +274,11 @@ python3 yellowstone_ground_station.py
 4. Refresh serial ports.
 5. Select `/dev/cu.usbmodem...` or the matching serial device.
 6. Click Connect.
+
+Important:
+
+- If the GUI connects and immediately disconnects, first make sure no Arduino
+  serial monitor or other terminal session still has the ground-board port open.
 7. Confirm table rows appear when airborne unit is transmitting.
 
 ### Live Map

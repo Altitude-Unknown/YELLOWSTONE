@@ -1,5 +1,86 @@
 # Yellowstone Debug Notes
 
+## 2026-06-25 Lab + Release Notes
+
+These notes capture the GitHub/release fixes and the final bench state that
+worked at the end of today's session.
+
+### GitHub / Release Workflow Fixes
+
+- The Yellowstone GUI release workflow now runs from the dedicated Yellowstone
+  repo instead of the wrong repo.
+- The current known-good public GUI release is:
+
+```text
+yellowstone-v0.1.5
+```
+
+- The dedicated repo release page is:
+
+```text
+https://github.com/Altitude-Unknown/YELLOWSTONE/releases/latest
+```
+
+- Older mistaken/test GUI releases were cleaned up so the public release list
+  is no longer cluttered with failed intermediate tags.
+
+### What Broke macOS Signing / Notarization
+
+The main signing problem was not the Python app itself. The blockers were Apple
+certificate / trust-chain setup issues plus one GitHub secret mismatch.
+
+What had to be fixed:
+
+- Apple Developer agreement was accepted in the Apple account.
+- A valid `Developer ID Application` certificate with private key was imported
+  locally and exported as a `.p12`.
+- The Apple `Developer ID` intermediate certificate was installed so the local
+  identity became trusted and showed up as a valid code-signing identity.
+- The base64 GitHub secret had to be regenerated from the current working `.p12`
+  after the certificate chain was corrected.
+- The `.p12` password secret had to match the actual export password.
+
+Important GitHub Actions secrets used by the Yellowstone release workflow:
+
+- `MACOS_CERTIFICATE_BASE64`
+- `MACOS_CERTIFICATE_PASSWORD`
+- `MACOS_KEYCHAIN_PASSWORD`
+- Apple notarization credentials already configured for the workflow
+
+Important lesson:
+
+- If `security find-identity -v -p codesigning` shows `0 valid identities found`
+  locally, the GitHub macOS signer setup is not really correct yet, even if a
+  certificate appears in Keychain Access.
+
+### Known-Good Bench State At End Of Session
+
+Ground and airborne firmware were both reflashed with the current Yellowstone
+firmware that matches the newest GUI release.
+
+Observed working USB ports during the final test:
+
+- Airborne: `/dev/cu.usbmodem1101`
+- Ground: `/dev/cu.usbmodem1201`
+
+Confirmed behavior:
+
+- The airborne board transmitted live LoRa packets.
+- Pressure, pressure altitude, pressure temperature, packet count, and vertical
+  speed were present in the airborne serial debug output.
+- The ground board received live packets and printed valid version-3 CSV rows.
+- The desktop GUI connected successfully after all serial monitors were closed.
+- The GUI disconnect-on-connect behavior was caused by the serial port still
+  being open in a monitor session.
+
+Important bench-test interpretation:
+
+- LoRa link was working end to end.
+- Pressure telemetry path was working end to end.
+- GPS did not have lock during the indoor bench test, so `gps_valid=0`,
+  `fix_type=0`, `sats=0`, and lat/lon stayed zero. This is expected indoors and
+  does not mean the LoRa link or pressure telemetry is broken.
+
 ## Current Status
 
 These notes capture where we left off before pausing lab work.

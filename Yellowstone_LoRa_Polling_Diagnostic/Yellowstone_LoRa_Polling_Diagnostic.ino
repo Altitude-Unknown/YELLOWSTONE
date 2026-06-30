@@ -16,6 +16,7 @@
 #define REG_RX_NB_BYTES          0x13
 #define REG_PKT_SNR_VALUE        0x19
 #define REG_PKT_RSSI_VALUE       0x1A
+#define REG_RSSI_VALUE           0x1B
 #define REG_MODEM_CONFIG_1       0x1D
 #define REG_MODEM_CONFIG_2       0x1E
 #define REG_MODEM_CONFIG_3       0x26
@@ -243,8 +244,22 @@ void loop() {
 
     Serial.print("heartbeat d3=");
     Serial.print(digitalRead(RFM95_INT));
+    Serial.print(" ver=0x");
+    printHex2(spiReadReg(REG_VERSION));
+    Serial.print(" op=0x");
+    printHex2(spiReadReg(REG_OP_MODE));
+    Serial.print(" m1=0x");
+    printHex2(spiReadReg(REG_MODEM_CONFIG_1));
+    Serial.print(" m2=0x");
+    printHex2(spiReadReg(REG_MODEM_CONFIG_2));
+    Serial.print(" m3=0x");
+    printHex2(spiReadReg(REG_MODEM_CONFIG_3));
+    Serial.print(" dio=0x");
+    printHex2(spiReadReg(REG_DIO_MAPPING_1));
     Serial.print(" irq=0x");
     printHex2(spiReadReg(REG_IRQ_FLAGS));
+    Serial.print(" rssiRaw=");
+    Serial.print(spiReadReg(REG_RSSI_VALUE));
     Serial.print(" wbRssiRaw=");
     Serial.print(spiReadReg(REG_RSSI_WIDEBAND));
     Serial.print(" rxDone=");
