@@ -12,7 +12,8 @@
 #define SD_CS      10
 
 #define RF95_FREQ  915.0
-#define TELEMETRY_INTERVAL_MS 2000
+#define TELEMETRY_INTERVAL_MS 8000
+#define SHERPA_BAUD 115200
 
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
 
@@ -30,6 +31,9 @@ const uint16_t PAYLOAD_MAGIC = 0x5953; // "YS"
 const uint8_t PAYLOAD_VERSION = 3;
 const uint8_t FLAG_GPS_VALID = 0x01;
 const uint8_t FLAG_PRESSURE_VALID = 0x02;
+const uint16_t COMMAND_MAGIC = 0x5943; // "YC"
+const uint8_t COMMAND_VERSION = 1;
+const uint8_t COMMAND_TYPE_CUTDOWN = 1;
 char AIRBORNE_LOG_FILE[] = "AIRLOG3.CSV";
 
 struct Payload {
@@ -55,10 +59,19 @@ struct Payload {
   uint8_t sats;
 } __attribute__((packed));
 
+struct CommandPacket {
+  uint16_t magic;
+  uint8_t version;
+  uint8_t command;
+  uint32_t sequence;
+  uint16_t checksum;
+} __attribute__((packed));
+
 Payload txData;
 
 unsigned long lastSend = 0;
 uint32_t txPacketCount = 0;
+uint32_t lastCutdownSequence = 0;
 uint8_t consecutiveGpsMisses = 0;
 uint8_t lastGpsSecond = 255;
 bool sdReady = false;
@@ -291,6 +304,48 @@ void configureLoRaLongRange() {
   rf95.setTxPower(23, false); // max power on PA_BOOST modules
 }
 
+uint16_t commandChecksum(const CommandPacket &command) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&command);
+  uint16_t checksum = 0xA5A5;
+  for (size_t i = 0; i < sizeof(CommandPacket) - sizeof(command.checksum); i++) {
+    checksum = static_cast<uint16_t>((checksum << 5) | (checksum >> 11));
+    checksum ^= bytes[i];
+  }
+  return checksum;
+}
+
+bool validCommandPacket(const CommandPacket &command) {
+  return command.magic == COMMAND_MAGIC &&
+      command.version == COMMAND_VERSION &&
+      command.checksum == commandChecksum(command);
+}
+
+void forwardCutdownToSherpa(uint32_t sequence) {
+  Serial1.print("SHERPA,CUTDOWN,");
+  Serial1.println(sequence);
+
+  Serial.print("Command forwarded to SHERPA: CUTDOWN seq=");
+  Serial.println(sequence);
+}
+
+void pollGroundCommand() {
+  if (!rf95.available()) return;
+
+  uint8_t buf[sizeof(CommandPacket)];
+  uint8_t len = sizeof(buf);
+  if (!rf95.recv(buf, &len)) return;
+  if (len != sizeof(CommandPacket)) return;
+
+  CommandPacket command;
+  memcpy(&command, buf, sizeof(command));
+  if (!validCommandPacket(command)) return;
+  if (command.command != COMMAND_TYPE_CUTDOWN) return;
+  if (command.sequence == lastCutdownSequence) return;
+
+  lastCutdownSequence = command.sequence;
+  forwardCutdownToSherpa(command.sequence);
+}
+
 void recoverGpsIfNeeded(bool freshGps, uint8_t gpsSecond) {
   bool gpsClockRunning = (gpsSecond != lastGpsSecond);
   lastGpsSecond = gpsSecond;
@@ -316,6 +371,7 @@ void recoverGpsIfNeeded(bool freshGps, uint8_t gpsSecond) {
 // ---------------- Setup ----------------
 void setup() {
   Serial.begin(115200);
+  Serial1.begin(SHERPA_BAUD);
 
   pinMode(RFM95_CS, OUTPUT);
   digitalWrite(RFM95_CS, HIGH);
@@ -349,12 +405,14 @@ void setup() {
   configureLoRaLongRange();
 
   Serial.println("LoRa ready: long-range mode");
+  Serial.println("SHERPA UART ready");
 }
 
 // ---------------- Loop ----------------
 void loop() {
+  pollGroundCommand();
+
   if (millis() - lastSend < TELEMETRY_INTERVAL_MS) return;
-  lastSend = millis();
 
   bool freshGps = gps.getPVT(250);
   uint8_t fixType = gps.getFixType();
@@ -385,6 +443,8 @@ void loop() {
   rf95.send((uint8_t *)&txData, sizeof(txData));
   rf95.waitPacketSent();
   txPacketCount++;
+  lastSend = millis();
+  pollGroundCommand();
   logAirborneTelemetry(txData, txPacketCount);
 
   // Debug

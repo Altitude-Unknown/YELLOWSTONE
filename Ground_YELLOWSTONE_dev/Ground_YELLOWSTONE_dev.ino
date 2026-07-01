@@ -14,6 +14,12 @@ const uint16_t PAYLOAD_MAGIC = 0x5953; // "YS"
 const uint8_t PAYLOAD_VERSION = 3;
 const uint8_t FLAG_GPS_VALID = 0x01;
 const uint8_t FLAG_PRESSURE_VALID = 0x02;
+const uint16_t COMMAND_MAGIC = 0x5943; // "YC"
+const uint8_t COMMAND_VERSION = 1;
+const uint8_t COMMAND_TYPE_CUTDOWN = 1;
+const uint8_t COMMAND_REPEAT_COUNT = 12;
+const uint16_t COMMAND_REPEAT_DELAY_MS = 250;
+const uint16_t COMMAND_TX_TIMEOUT_MS = 5000;
 char GROUND_LOG_FILE[] = "GNDLOG.CSV";
 
 struct Payload {
@@ -39,9 +45,20 @@ struct Payload {
   uint8_t sats;
 } __attribute__((packed));
 
+struct CommandPacket {
+  uint16_t magic;
+  uint8_t version;
+  uint8_t command;
+  uint32_t sequence;
+  uint16_t checksum;
+} __attribute__((packed));
+
 Payload rxData;
 uint32_t packetCount = 0;
 uint32_t badPacketCount = 0;
+uint32_t commandSequence = 0;
+char serialCommandLine[40];
+uint8_t serialCommandLen = 0;
 bool sdReady = false;
 
 void configureLoRaLongRange() {
@@ -141,6 +158,88 @@ void logGroundTelemetry(const Payload &data, int rssi, uint32_t packetNumber) {
   logFile.close();
 }
 
+uint16_t commandChecksum(const CommandPacket &command) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&command);
+  uint16_t checksum = 0xA5A5;
+  for (size_t i = 0; i < sizeof(CommandPacket) - sizeof(command.checksum); i++) {
+    checksum = static_cast<uint16_t>((checksum << 5) | (checksum >> 11));
+    checksum ^= bytes[i];
+  }
+  return checksum;
+}
+
+void sendCutdownCommand() {
+  CommandPacket command;
+  command.magic = COMMAND_MAGIC;
+  command.version = COMMAND_VERSION;
+  command.command = COMMAND_TYPE_CUTDOWN;
+  uint32_t uptimeSequence = millis();
+  if (uptimeSequence > commandSequence) {
+    commandSequence = uptimeSequence;
+  } else {
+    commandSequence++;
+  }
+  if (commandSequence == 0) commandSequence = 1;
+  command.sequence = commandSequence;
+  command.checksum = commandChecksum(command);
+
+  uint8_t sentCount = 0;
+  uint8_t timeoutCount = 0;
+  for (uint8_t i = 0; i < COMMAND_REPEAT_COUNT; i++) {
+    if (!rf95.send(reinterpret_cast<uint8_t *>(&command), sizeof(command))) {
+      timeoutCount++;
+      rf95.setModeRx();
+      delay(COMMAND_REPEAT_DELAY_MS);
+      continue;
+    }
+
+    if (rf95.waitPacketSent(COMMAND_TX_TIMEOUT_MS)) {
+      sentCount++;
+    } else {
+      timeoutCount++;
+      rf95.setModeRx();
+    }
+    delay(COMMAND_REPEAT_DELAY_MS);
+  }
+
+  Serial.print("STATUS,CUTDOWN_SENT,");
+  Serial.print(command.sequence);
+  Serial.print(",sent,");
+  Serial.print(sentCount);
+  Serial.print(",timeouts,");
+  Serial.println(timeoutCount);
+}
+
+void processSerialCommand(const char *line) {
+  if (strcmp(line, "CMD,CUTDOWN") == 0) {
+    sendCutdownCommand();
+    return;
+  }
+
+  Serial.print("STATUS,UNKNOWN_COMMAND,");
+  Serial.println(line);
+}
+
+void readSerialCommands() {
+  while (Serial.available()) {
+    char ch = static_cast<char>(Serial.read());
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      serialCommandLine[serialCommandLen] = '\0';
+      if (serialCommandLen > 0) processSerialCommand(serialCommandLine);
+      serialCommandLen = 0;
+      continue;
+    }
+
+    if (serialCommandLen < sizeof(serialCommandLine) - 1) {
+      serialCommandLine[serialCommandLen++] = ch;
+    } else {
+      serialCommandLen = 0;
+      Serial.println("STATUS,COMMAND_TOO_LONG");
+    }
+  }
+}
+
 void initGroundLog() {
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
@@ -195,6 +294,8 @@ void setup() {
 }
 
 void loop() {
+  readSerialCommands();
+
   if (!rf95.available()) return;
 
   uint8_t buf[sizeof(Payload)];

@@ -2,7 +2,7 @@
 
 Living manual for the Yellowstone LoRa telemetry airborne unit, ground unit, and desktop GUI.
 
-Last updated: 2026-06-25
+Last updated: 2026-06-30
 
 ## System Overview
 
@@ -12,7 +12,13 @@ The Yellowstone system has three main pieces:
 - **Ground firmware:** `Ground_YELLOWSTONE_dev/Ground_YELLOWSTONE_dev.ino`
 - **Desktop ground-station GUI:** `yellowstone_ground_station.py`
 
-The airborne unit reads GNSS data, builds telemetry payloads, transmits them by LoRa, and optionally logs to SD. The ground unit receives LoRa telemetry, prints CSV rows over USB serial, and optionally logs to SD. The desktop GUI reads ground serial CSV rows, displays live telemetry, exports data, and creates a live browser map.
+The airborne unit reads GNSS data, builds telemetry payloads, transmits them by LoRa, and optionally logs to SD. The ground unit receives LoRa telemetry, prints CSV rows over USB serial, and optionally logs to SD. The desktop GUI reads ground serial CSV rows, displays live telemetry, exports data, creates a live browser map, and can send a guarded cutdown command.
+
+The cutdown command path is:
+
+```text
+Ground Station GUI -> Ground YELLOWSTONE -> LoRa -> Airborne YELLOWSTONE -> SHERPA UART -> ICARUS cutdown PCB
+```
 
 ## Hardware Target
 
@@ -99,6 +105,9 @@ include both metric and US-standard conversions.
 - Initialize RFM95 LoRa.
 - Read GNSS PVT data.
 - Transmit telemetry payload every `2000 ms`.
+- Listen for ground command packets between telemetry transmissions.
+- Forward accepted cutdown commands to SHERPA over the Feather M0 `Serial1`
+  UART at `115200 baud`.
 - Log airborne telemetry to `AIRLOG3.CSV` when SD is available.
 
 ### Airborne Startup Messages
@@ -114,6 +123,123 @@ MS5x pressure sensor ready at 0x77
 MS5x pressure sensor not found at 0x76 or 0x77; pressure telemetry disabled
 LoRa init failed
 LoRa ready: long-range mode
+SHERPA UART ready
+Command forwarded to SHERPA: CUTDOWN seq=12
+```
+
+### Airborne to SHERPA UART
+
+Connect Airborne YELLOWSTONE `Serial1` to the SHERPA UART connector:
+
+```text
+Airborne TX -> SHERPA RX-YELLOWSTONE
+Airborne RX -> SHERPA TX-YELLOWSTONE
+Airborne GND -> SHERPA GND
+```
+
+When a valid ground command is received, Airborne writes one ASCII line:
+
+```text
+SHERPA,CUTDOWN,<sequence>
+```
+
+Repeated LoRa command packets with the same sequence number are ignored after
+the first forward, so SHERPA should receive a single UART cutdown line per GUI
+command.
+
+## SHERPA Cutdown Bridge
+
+Firmware:
+
+```text
+SHERPA_Cutdown_Bridge/SHERPA_Cutdown_Bridge.ino
+```
+
+Target:
+
+```text
+esp32:esp32:esp32c3:CDCOnBoot=cdc
+```
+
+SHERPA listens to Airborne YELLOWSTONE over UART and forwards accepted cutdown
+commands to ICARUS over ESP-NOW on channel `1`.
+
+USB debug messages include:
+
+```text
+SHERPA,BOOT
+SHERPA,YELLOWSTONE_UART_READY
+SHERPA,READY,MAC,80:F1:B2:F0:1B:3C
+SHERPA,UART_RX,SHERPA,CUTDOWN,12347
+SHERPA,CUTDOWN_FORWARDED,12347,ok_delta,5,fail_delta,0
+SHERPA,HEARTBEAT,ms,12996,last_sequence,12347,espnow_ok,5,espnow_fail,0
+```
+
+### Flashing SHERPA
+
+Compile:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc "SHERPA_Cutdown_Bridge"
+```
+
+Upload:
+
+```bash
+arduino-cli upload -p /dev/cu.usbmodem1201 --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc "SHERPA_Cutdown_Bridge"
+```
+
+Port names vary by computer and OS.
+
+## ICARUS Cutdown Receiver
+
+Firmware:
+
+```text
+ICARUS_Cutdown_Receiver/ICARUS_Cutdown_Receiver.ino
+```
+
+Target:
+
+```text
+esp32:esp32:esp32c6:CDCOnBoot=cdc
+```
+
+ICARUS listens for SHERPA ESP-NOW packets on channel `1`. When it receives a
+valid cutdown packet with a new sequence number, it drives:
+
+```text
+GPIO10 -> main cutdown MOSFET
+GPIO11 -> backup cutdown MOSFET
+```
+
+Both MOSFET outputs are held high for `8000 ms`, then forced low. Duplicate
+packets with the same sequence number are counted but ignored, so SHERPA's
+repeated ESP-NOW sends do not restart the burn timer.
+
+USB debug messages include:
+
+```text
+ICARUS,BOOT
+ICARUS,READY,MAC,...
+ICARUS,CUTDOWN_RX,seq,12347,from,80:f1:b2:f0:1b:3c
+ICARUS,CUTDOWN_ACTIVE,seq,12347,duration_ms,8000
+ICARUS,CUTDOWN_COMPLETE,seq,12347
+ICARUS,HEARTBEAT,ms,12000,active,0,last_sequence,12347,rx,5,accepted,1,duplicates,4,rejected,0
+```
+
+### Flashing ICARUS
+
+Compile:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc "ICARUS_Cutdown_Receiver"
+```
+
+Upload:
+
+```bash
+arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc "ICARUS_Cutdown_Receiver"
 ```
 
 ### Airborne SD Log
@@ -154,6 +280,8 @@ arduino-cli upload -p /dev/cu.usbmodem1101 --fqbn adafruit:samd:adafruit_feather
 - Reject payloads with bad size, magic, or version.
 - Print valid telemetry as CSV over USB serial.
 - Log valid telemetry to `GNDLOG3.CSV` when SD is available.
+- Accept `CMD,CUTDOWN` from the desktop GUI over USB serial.
+- Transmit a short LoRa command packet to the airborne unit.
 
 ### Ground Startup Messages
 
@@ -166,6 +294,7 @@ LoRa init failed
 Set freq failed
 Ground station ready
 LoRa ready: long-range mode
+STATUS,CUTDOWN_SENT,12
 ```
 
 ### Ground Serial CSV Format
@@ -178,8 +307,24 @@ lat,lon,gps_alt_m,gps_alt_ft,ground_speed_mps,ground_speed_mph,vertical_speed_mp
 
 Rows with `gps_valid` set to `0` are shown in the table but are not added to the live map trail.
 
-The current desktop GUI understands the version-2 CSV schema. It must be
-updated before it can consume version-3 ground-station telemetry.
+The current desktop GUI understands the version-3 CSV schema.
+
+### Ground Serial Commands
+
+The GUI sends cutdown requests to the Ground YELLOWSTONE as:
+
+```text
+CMD,CUTDOWN
+```
+
+The ground board responds with:
+
+```text
+STATUS,CUTDOWN_SENT,<sequence>
+```
+
+The ground board repeats the LoRa command packet three times for better receive
+odds, using the same sequence number each time.
 
 ### Pressure Telemetry Verification
 
@@ -245,6 +390,7 @@ yellowstone_ground_station.py
 - Reads Yellowstone CSV telemetry from the ground board serial port.
 - Shows a telemetry table.
 - Shows live telemetry summary values.
+- Sends a confirmed cutdown command to the ground board.
 - Writes live map data to `yellowstone_live_site`.
 - Opens a browser Leaflet/OpenStreetMap live map.
 - Exports CSV.

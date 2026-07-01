@@ -12,6 +12,8 @@ For the full Yellowstone airborne, ground, and GUI operating manual, see [MANUAL
 - Shows GPS altitude, pressure altitude, corrected pressure altitude, pressure,
   temperature, and vertical speed.
 - Computes payload range and bearing from a user-entered launch location.
+- Sends a confirmed cutdown command through Ground YELLOWSTONE to Airborne
+  YELLOWSTONE, which forwards it to SHERPA over UART for ICARUS.
 - Generates a live Leaflet/OpenStreetMap page in `yellowstone_live_site`.
 - Can publish the map folder to Netlify using Netlify CLI settings.
 
@@ -38,6 +40,22 @@ lat,lon,gps_alt_m,gps_alt_ft,ground_speed_mps,ground_speed_mph,vertical_speed_mp
 Rows with `gps_valid` equal to `0` are shown in the table but are not added to the map trail.
 
 Pressure telemetry may still be valid when `gps_valid` is `0`.
+
+## Cutdown Command
+
+When connected to the ground Yellowstone serial port, the GUI enables **Send
+Cutdown**. Pressing it asks for confirmation, then sends:
+
+```text
+CMD,CUTDOWN
+```
+
+The ground board transmits a LoRa command to Airborne YELLOWSTONE. Airborne
+forwards accepted commands to SHERPA over `Serial1` as:
+
+```text
+SHERPA,CUTDOWN,<sequence>
+```
 
 ## Netlify Publishing
 

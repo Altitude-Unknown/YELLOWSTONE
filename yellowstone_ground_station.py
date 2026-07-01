@@ -211,11 +211,22 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
 
 
 class SerialReader(threading.Thread):
-    def __init__(self, port: str, out_queue: queue.Queue, stop_event: threading.Event):
+    def __init__(self, port: str, out_queue: queue.Queue, command_queue: queue.Queue, stop_event: threading.Event):
         super().__init__(daemon=True)
         self.port = port
         self.out_queue = out_queue
+        self.command_queue = command_queue
         self.stop_event = stop_event
+
+    def write_pending_commands(self, ser):
+        while True:
+            try:
+                command = self.command_queue.get_nowait()
+            except queue.Empty:
+                return
+            ser.write((command.strip() + "\n").encode("utf-8"))
+            ser.flush()
+            self.out_queue.put(("status", f"Sent command: {command}"))
 
     def run(self):
         try:
@@ -224,7 +235,9 @@ class SerialReader(threading.Thread):
                 ser.reset_input_buffer()
                 self.out_queue.put(("status", f"Connected to {self.port}"))
                 while not self.stop_event.is_set():
+                    self.write_pending_commands(ser)
                     raw = ser.readline()
+                    self.write_pending_commands(ser)
                     if not raw:
                         continue
                     line = raw.decode("utf-8", errors="replace").strip()
@@ -253,6 +266,7 @@ class GroundStationApp(tk.Tk):
         self.settings = self.load_settings()
 
         self.serial_queue = queue.Queue()
+        self.command_queue = queue.Queue()
         self.stop_event = threading.Event()
         self.reader = None
         self.points = []
@@ -321,6 +335,8 @@ class GroundStationApp(tk.Tk):
         ttk.Button(top, text="Publish Now", command=self.publish_now).pack(side="left")
         ttk.Button(top, text="Export CSV", command=self.export_csv).pack(side="left", padx=(18, 6))
         ttk.Button(top, text="Export KML", command=self.export_kml).pack(side="left")
+        self.cutdown_btn = ttk.Button(top, text="Send Cutdown", command=self.send_cutdown_command, state="disabled")
+        self.cutdown_btn.pack(side="left", padx=(18, 0))
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=18)
 
         panes = ttk.Panedwindow(root, orient="horizontal")
@@ -462,16 +478,36 @@ class GroundStationApp(tk.Tk):
             messagebox.showwarning(APP_TITLE, "Choose a serial port first.")
             return
         self.stop_event.clear()
-        self.reader = SerialReader(port, self.serial_queue, self.stop_event)
+        self.reader = SerialReader(port, self.serial_queue, self.command_queue, self.stop_event)
         self.reader.start()
         self.connect_btn.configure(text="Disconnect")
+        self.cutdown_btn.configure(state="normal")
         self.status_var.set(f"Opening {port}")
 
     def disconnect(self):
         self.stop_event.set()
         self.reader = None
         self.connect_btn.configure(text="Connect")
+        self.cutdown_btn.configure(state="disabled")
         self.status_var.set("Disconnected")
+
+    def send_cutdown_command(self):
+        if not self.reader:
+            messagebox.showwarning(APP_TITLE, "Connect to the ground Yellowstone serial port first.")
+            return
+
+        confirmed = messagebox.askyesno(
+            APP_TITLE,
+            "Send CUTDOWN command to the airborne Yellowstone and SHERPA?\n\n"
+            "This should only be used when you intend to activate the flight termination system.",
+            icon="warning",
+        )
+        if not confirmed:
+            self.status_var.set("Cutdown command cancelled")
+            return
+
+        self.command_queue.put("CMD,CUTDOWN")
+        self.status_var.set("Queued cutdown command")
 
     def process_serial_queue(self):
         while True:
@@ -485,7 +521,13 @@ class GroundStationApp(tk.Tk):
             elif kind == "status":
                 self.status_var.set(value)
             elif kind == "raw":
-                self.status_var.set(f"Ignored serial text: {value[:80]}")
+                if value.startswith("STATUS,CUTDOWN_SENT,"):
+                    sequence = value.rsplit(",", 1)[-1]
+                    self.status_var.set(f"Cutdown command transmitted by ground Yellowstone, seq {sequence}")
+                elif value.startswith("STATUS,"):
+                    self.status_var.set(value)
+                else:
+                    self.status_var.set(f"Ignored serial text: {value[:80]}")
             elif kind == "error":
                 self.status_var.set(value)
                 self.disconnect()
