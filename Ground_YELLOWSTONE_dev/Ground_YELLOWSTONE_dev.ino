@@ -17,6 +17,9 @@ const uint8_t FLAG_PRESSURE_VALID = 0x02;
 const uint16_t COMMAND_MAGIC = 0x5943; // "YC"
 const uint8_t COMMAND_VERSION = 1;
 const uint8_t COMMAND_TYPE_CUTDOWN = 1;
+const uint16_t ACK_MAGIC = 0x5941; // "YA"
+const uint8_t ACK_VERSION = 1;
+const uint8_t ACK_TYPE_ICARUS_CUTDOWN = 1;
 const uint8_t COMMAND_REPEAT_COUNT = 12;
 const uint16_t COMMAND_REPEAT_DELAY_MS = 250;
 const uint16_t COMMAND_TX_TIMEOUT_MS = 5000;
@@ -50,6 +53,15 @@ struct CommandPacket {
   uint8_t version;
   uint8_t command;
   uint32_t sequence;
+  uint16_t checksum;
+} __attribute__((packed));
+
+struct AckPacket {
+  uint16_t magic;
+  uint8_t version;
+  uint8_t ackType;
+  uint32_t sequence;
+  uint32_t acceptedCount;
   uint16_t checksum;
 } __attribute__((packed));
 
@@ -168,7 +180,27 @@ uint16_t commandChecksum(const CommandPacket &command) {
   return checksum;
 }
 
+uint16_t ackChecksum(const AckPacket &packet) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&packet);
+  uint16_t checksum = 0xB4B4;
+  for (size_t i = 0; i < sizeof(AckPacket) - sizeof(packet.checksum); i++) {
+    checksum = static_cast<uint16_t>((checksum << 6) | (checksum >> 10));
+    checksum ^= bytes[i];
+  }
+  return checksum;
+}
+
+bool validAckPacket(const AckPacket &packet) {
+  return packet.magic == ACK_MAGIC &&
+      packet.version == ACK_VERSION &&
+      packet.ackType == ACK_TYPE_ICARUS_CUTDOWN &&
+      packet.sequence != 0 &&
+      packet.checksum == ackChecksum(packet);
+}
+
 void sendCutdownCommand() {
+  // Ground sends the cutdown command over LoRa only. Airborne YELLOWSTONE
+  // forwards accepted commands to SHERPA over its PB22/PB23 Serial5 UART.
   CommandPacket command;
   command.magic = COMMAND_MAGIC;
   command.version = COMMAND_VERSION;
@@ -298,10 +330,28 @@ void loop() {
 
   if (!rf95.available()) return;
 
-  uint8_t buf[sizeof(Payload)];
+  uint8_t buf[sizeof(Payload) > sizeof(AckPacket) ? sizeof(Payload) : sizeof(AckPacket)];
   uint8_t len = sizeof(buf);
 
   if (!rf95.recv(buf, &len)) return;
+
+  if (len == sizeof(AckPacket)) {
+    AckPacket ack;
+    memcpy(&ack, buf, sizeof(ack));
+    if (!validAckPacket(ack)) {
+      badPacketCount++;
+      return;
+    }
+
+    Serial.print("STATUS,ICARUS_ACK,");
+    Serial.print(ack.sequence);
+    Serial.print(",accepted,");
+    Serial.print(ack.acceptedCount);
+    Serial.print(",rssi,");
+    Serial.println(rf95.lastRssi());
+    return;
+  }
+
   if (len != sizeof(Payload)) {
     badPacketCount++;
     return;

@@ -16,6 +16,7 @@
 const uint32_t ICARUS_MAGIC = 0x49535543UL; // "ICUS"
 const uint8_t ICARUS_VERSION = 1;
 const uint8_t ICARUS_COMMAND_CUTDOWN = 1;
+const uint8_t ICARUS_MESSAGE_ACK = 2;
 const uint8_t ESPNOW_CHANNEL = 1;
 const uint8_t ESPNOW_REPEATS = 5;
 const uint16_t ESPNOW_REPEAT_DELAY_MS = 100;
@@ -34,12 +35,25 @@ struct IcarusCommandPacket {
   uint16_t checksum;
 } __attribute__((packed));
 
+struct IcarusAckPacket {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t message;
+  uint32_t sequence;
+  uint32_t acceptedCount;
+  uint16_t checksum;
+} __attribute__((packed));
+
 char commandLine[64];
 uint8_t commandLineLen = 0;
 char usbLine[64];
 uint8_t usbLineLen = 0;
 uint32_t lastForwardedSequence = 0;
+uint32_t lastAckSequence = 0;
 uint32_t lastHeartbeatMs = 0;
+volatile bool pendingIcarusAck = false;
+volatile uint32_t pendingAckSequence = 0;
+volatile uint32_t pendingAckAcceptedCount = 0;
 volatile uint32_t espNowSendOk = 0;
 volatile uint32_t espNowSendFail = 0;
 
@@ -51,6 +65,24 @@ uint16_t packetChecksum(const IcarusCommandPacket &packet) {
     checksum ^= bytes[i];
   }
   return checksum;
+}
+
+uint16_t ackChecksum(const IcarusAckPacket &packet) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&packet);
+  uint16_t checksum = 0x3C3C;
+  for (size_t i = 0; i < sizeof(IcarusAckPacket) - sizeof(packet.checksum); i++) {
+    checksum = static_cast<uint16_t>((checksum << 4) | (checksum >> 12));
+    checksum ^= bytes[i];
+  }
+  return checksum;
+}
+
+bool validAckPacket(const IcarusAckPacket &packet) {
+  return packet.magic == ICARUS_MAGIC &&
+      packet.version == ICARUS_VERSION &&
+      packet.message == ICARUS_MESSAGE_ACK &&
+      packet.sequence != 0 &&
+      packet.checksum == ackChecksum(packet);
 }
 
 void setLed(uint8_t pin, bool on) {
@@ -76,6 +108,19 @@ void onEspNowSend(const wifi_tx_info_t *info, esp_now_send_status_t status) {
   }
 }
 
+void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  (void)info;
+  if (len != sizeof(IcarusAckPacket)) return;
+
+  IcarusAckPacket packet;
+  memcpy(&packet, data, sizeof(packet));
+  if (!validAckPacket(packet)) return;
+
+  pendingAckSequence = packet.sequence;
+  pendingAckAcceptedCount = packet.acceptedCount;
+  pendingIcarusAck = true;
+}
+
 bool initEspNow() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false, true);
@@ -88,6 +133,7 @@ bool initEspNow() {
   }
 
   esp_now_register_send_cb(onEspNowSend);
+  esp_now_register_recv_cb(onEspNowReceive);
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, broadcastPeer, sizeof(broadcastPeer));
@@ -104,6 +150,29 @@ bool initEspNow() {
   Serial.print("SHERPA,READY,MAC,");
   Serial.println(WiFi.macAddress());
   return true;
+}
+
+void forwardIcarusAckToYellowstone() {
+  if (!pendingIcarusAck) return;
+
+  noInterrupts();
+  uint32_t sequence = pendingAckSequence;
+  uint32_t acceptedCount = pendingAckAcceptedCount;
+  pendingIcarusAck = false;
+  interrupts();
+
+  if (sequence == 0 || sequence == lastAckSequence) return;
+  lastAckSequence = sequence;
+
+  YellowstoneSerial.print("ICARUS,ACK,");
+  YellowstoneSerial.print(sequence);
+  YellowstoneSerial.print(",accepted,");
+  YellowstoneSerial.println(acceptedCount);
+
+  Serial.print("SHERPA,ICARUS_ACK,seq,");
+  Serial.print(sequence);
+  Serial.print(",accepted,");
+  Serial.println(acceptedCount);
 }
 
 void sendCutdownToIcarus(uint32_t sequence) {
@@ -247,7 +316,9 @@ void printHeartbeat() {
   Serial.print(",espnow_ok,");
   Serial.print(espNowSendOk);
   Serial.print(",espnow_fail,");
-  Serial.println(espNowSendFail);
+  Serial.print(espNowSendFail);
+  Serial.print(",last_ack_sequence,");
+  Serial.println(lastAckSequence);
 }
 
 void setup() {
@@ -268,5 +339,6 @@ void setup() {
 void loop() {
   readYellowstoneUart();
   readUsbDebug();
+  forwardIcarusAckToYellowstone();
   printHeartbeat();
 }

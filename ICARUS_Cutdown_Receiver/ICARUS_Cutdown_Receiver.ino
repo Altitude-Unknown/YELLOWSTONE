@@ -13,8 +13,15 @@
 const uint32_t ICARUS_MAGIC = 0x49535543UL; // "ICUS"
 const uint8_t ICARUS_VERSION = 1;
 const uint8_t ICARUS_COMMAND_CUTDOWN = 1;
+const uint8_t ICARUS_MESSAGE_ACK = 2;
 const uint8_t ESPNOW_CHANNEL = 1;
 const uint32_t CUTDOWN_BURN_MS = 8000;
+const uint8_t ACK_REPEAT_COUNT = 5;
+const uint16_t ACK_REPEAT_DELAY_MS = 60;
+
+const uint8_t broadcastPeer[ESP_NOW_ETH_ALEN] = {
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
 
 struct IcarusCommandPacket {
   uint32_t magic;
@@ -24,8 +31,19 @@ struct IcarusCommandPacket {
   uint16_t checksum;
 } __attribute__((packed));
 
+struct IcarusAckPacket {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t message;
+  uint32_t sequence;
+  uint32_t acceptedCount;
+  uint16_t checksum;
+} __attribute__((packed));
+
 volatile bool pendingCutdown = false;
+volatile bool pendingAck = false;
 volatile uint32_t pendingSequence = 0;
+volatile uint32_t pendingAckSequence = 0;
 uint32_t lastAcceptedSequence = 0;
 uint32_t cutdownStartedMs = 0;
 uint32_t lastHeartbeatMs = 0;
@@ -40,6 +58,16 @@ uint16_t packetChecksum(const IcarusCommandPacket &packet) {
   uint16_t checksum = 0x5A5A;
   for (size_t i = 0; i < sizeof(IcarusCommandPacket) - sizeof(packet.checksum); i++) {
     checksum = static_cast<uint16_t>((checksum << 3) | (checksum >> 13));
+    checksum ^= bytes[i];
+  }
+  return checksum;
+}
+
+uint16_t ackChecksum(const IcarusAckPacket &packet) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&packet);
+  uint16_t checksum = 0x3C3C;
+  for (size_t i = 0; i < sizeof(IcarusAckPacket) - sizeof(packet.checksum); i++) {
+    checksum = static_cast<uint16_t>((checksum << 4) | (checksum >> 12));
     checksum ^= bytes[i];
   }
   return checksum;
@@ -92,7 +120,9 @@ void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int l
 
   lastAcceptedSequence = packet.sequence;
   pendingSequence = packet.sequence;
+  pendingAckSequence = packet.sequence;
   pendingCutdown = true;
+  pendingAck = true;
   acceptedPacketCount++;
 
   Serial.print("ICARUS,CUTDOWN_RX,seq,");
@@ -117,9 +147,39 @@ bool initEspNow() {
     return false;
   }
 
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, broadcastPeer, sizeof(broadcastPeer));
+  peer.ifidx = WIFI_IF_STA;
+  peer.channel = ESPNOW_CHANNEL;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("ICARUS,ERROR,ESPNOW_ADD_PEER_FAILED");
+    return false;
+  }
+
   Serial.print("ICARUS,READY,MAC,");
   Serial.println(WiFi.macAddress());
   return true;
+}
+
+void sendAckToSherpa(uint32_t sequence) {
+  IcarusAckPacket packet;
+  packet.magic = ICARUS_MAGIC;
+  packet.version = ICARUS_VERSION;
+  packet.message = ICARUS_MESSAGE_ACK;
+  packet.sequence = sequence;
+  packet.acceptedCount = acceptedPacketCount;
+  packet.checksum = ackChecksum(packet);
+
+  for (uint8_t i = 0; i < ACK_REPEAT_COUNT; i++) {
+    esp_now_send(broadcastPeer, reinterpret_cast<uint8_t *>(&packet), sizeof(packet));
+    delay(ACK_REPEAT_DELAY_MS);
+  }
+
+  Serial.print("ICARUS,ACK_SENT,seq,");
+  Serial.print(sequence);
+  Serial.print(",accepted,");
+  Serial.println(acceptedPacketCount);
 }
 
 void startCutdown(uint32_t sequence) {
@@ -191,6 +251,14 @@ void setup() {
 }
 
 void loop() {
+  if (pendingAck) {
+    noInterrupts();
+    uint32_t sequence = pendingAckSequence;
+    pendingAck = false;
+    interrupts();
+    sendAckToSherpa(sequence);
+  }
+
   if (pendingCutdown) {
     noInterrupts();
     uint32_t sequence = pendingSequence;

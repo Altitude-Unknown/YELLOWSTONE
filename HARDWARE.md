@@ -15,6 +15,21 @@ Working target board: Adafruit Feather M0 / SAMD21, `adafruit:samd:adafruit_feat
 | SPI SCK | Feather SCK | Shared by LoRa and SD |
 | I2C SDA | Feather SDA | Shared by GPS / sensors |
 | I2C SCL | Feather SCL | Shared by GPS / sensors |
+| SHERPA UART TX | PB22 / SAMD21 package pin 37 / Arduino D30 | `Serial5` TX to SHERPA RX-YELLOWSTONE |
+| SHERPA UART RX | PB23 / SAMD21 package pin 38 / Arduino D31 | `Serial5` RX from SHERPA TX-YELLOWSTONE |
+
+## SHERPA UART Note
+
+Yellowstone's SHERPA connector uses the Feather M0 core's `Serial5`, not
+`Serial1`. The Adafruit Feather M0 variant maps:
+
+```text
+Serial5 TX = PB22 / SAMD21 package pin 37 / Arduino D30
+Serial5 RX = PB23 / SAMD21 package pin 38 / Arduino D31
+```
+
+The default `Serial1` on this core is PA10/PA11 and will not drive the
+Yellowstone SHERPA UART connector.
 
 ## Expected I2C Devices
 
@@ -72,6 +87,8 @@ Temporary board test sketches live in:
 
 - `Yellowstone_Board_Diagnostic`
 - `Yellowstone_Ground_Rx_Diagnostic`
+- `Yellowstone_UART_Ping_Talker`
+- `Yellowstone_UART_Ping_Responder`
 
 The board diagnostic checks:
 

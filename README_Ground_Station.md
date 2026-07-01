@@ -51,11 +51,21 @@ CMD,CUTDOWN
 ```
 
 The ground board transmits a LoRa command to Airborne YELLOWSTONE. Airborne
-forwards accepted commands to SHERPA over `Serial1` as:
+forwards accepted commands to SHERPA over the Yellowstone PB22/PB23 `Serial5`
+UART as:
 
 ```text
 SHERPA,CUTDOWN,<sequence>
 ```
+
+When ICARUS accepts the command, the acknowledgement returns through SHERPA,
+Airborne, and Ground. The ground board prints:
+
+```text
+STATUS,ICARUS_ACK,<sequence>,accepted,<count>,rssi,<rssi>
+```
+
+The GUI shows that acknowledgement in the Cutdown panel.
 
 ## Netlify Publishing
 

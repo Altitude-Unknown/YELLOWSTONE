@@ -106,7 +106,7 @@ include both metric and US-standard conversions.
 - Read GNSS PVT data.
 - Transmit telemetry payload every `2000 ms`.
 - Listen for ground command packets between telemetry transmissions.
-- Forward accepted cutdown commands to SHERPA over the Feather M0 `Serial1`
+- Forward accepted cutdown commands to SHERPA over the Feather M0 `Serial5`
   UART at `115200 baud`.
 - Log airborne telemetry to `AIRLOG3.CSV` when SD is available.
 
@@ -129,7 +129,16 @@ Command forwarded to SHERPA: CUTDOWN seq=12
 
 ### Airborne to SHERPA UART
 
-Connect Airborne YELLOWSTONE `Serial1` to the SHERPA UART connector:
+Connect Airborne YELLOWSTONE `Serial5` to the SHERPA UART connector. On the
+Yellowstone Feather M0 target, this is the PB22/PB23 UART:
+
+```text
+PB22 / SAMD21 package pin 37 / Arduino D30 = Serial5 TX
+PB23 / SAMD21 package pin 38 / Arduino D31 = Serial5 RX
+```
+
+Do not use the Feather M0 core's default `Serial1` for this connector;
+`Serial1` is PA10/PA11 and does not reach the Yellowstone SHERPA UART pins.
 
 ```text
 Airborne TX -> SHERPA RX-YELLOWSTONE
@@ -146,6 +155,10 @@ SHERPA,CUTDOWN,<sequence>
 Repeated LoRa command packets with the same sequence number are ignored after
 the first forward, so SHERPA should receive a single UART cutdown line per GUI
 command.
+
+When SHERPA reports that ICARUS acknowledged a cutdown sequence, Airborne
+queues a compact LoRa acknowledgement and repeats it for several seconds so
+Ground can receive it after finishing its cutdown transmit burst.
 
 ## SHERPA Cutdown Bridge
 
@@ -172,7 +185,8 @@ SHERPA,YELLOWSTONE_UART_READY
 SHERPA,READY,MAC,80:F1:B2:F0:1B:3C
 SHERPA,UART_RX,SHERPA,CUTDOWN,12347
 SHERPA,CUTDOWN_FORWARDED,12347,ok_delta,5,fail_delta,0
-SHERPA,HEARTBEAT,ms,12996,last_sequence,12347,espnow_ok,5,espnow_fail,0
+SHERPA,ICARUS_ACK,seq,12347,accepted,1
+SHERPA,HEARTBEAT,ms,12996,last_sequence,12347,espnow_ok,5,espnow_fail,0,last_ack_sequence,12347
 ```
 
 ### Flashing SHERPA
@@ -223,10 +237,30 @@ USB debug messages include:
 ICARUS,BOOT
 ICARUS,READY,MAC,...
 ICARUS,CUTDOWN_RX,seq,12347,from,80:f1:b2:f0:1b:3c
+ICARUS,ACK_SENT,seq,12347,accepted,1
 ICARUS,CUTDOWN_ACTIVE,seq,12347,duration_ms,8000
 ICARUS,CUTDOWN_COMPLETE,seq,12347
 ICARUS,HEARTBEAT,ms,12000,active,0,last_sequence,12347,rx,5,accepted,1,duplicates,4,rejected,0
 ```
+
+### ICARUS Acknowledgement Path
+
+After accepting a new cutdown sequence, ICARUS sends an ESP-NOW acknowledgement
+back toward SHERPA. The full return path is:
+
+```text
+ICARUS -> ESP-NOW broadcast ack -> SHERPA -> UART -> Airborne
+Airborne -> repeated LoRa ack -> Ground -> USB STATUS line -> GUI
+```
+
+Ground prints:
+
+```text
+STATUS,ICARUS_ACK,<sequence>,accepted,<count>,rssi,<rssi>
+```
+
+The GUI displays this in the Cutdown panel as the confirmation that ICARUS
+received and accepted the cutdown command.
 
 ### Flashing ICARUS
 

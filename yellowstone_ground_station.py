@@ -280,6 +280,7 @@ class GroundStationApp(tk.Tk):
 
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Not connected")
+        self.cutdown_ack_var = tk.StringVar(value="No ICARUS ack yet")
         self.map_status_var = tk.StringVar(value="No valid GPS point yet")
         self.netlify_site_var = tk.StringVar(value=self.settings.get("netlify_site_id", ""))
         self.netlify_token_var = tk.StringVar(value=self.settings.get("netlify_auth_token", ""))
@@ -331,13 +332,9 @@ class GroundStationApp(tk.Tk):
         ttk.Button(top, text="Refresh", command=self.refresh_ports).pack(side="left")
         self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection)
         self.connect_btn.pack(side="left", padx=6)
-        ttk.Button(top, text="Open Map", command=self.open_map).pack(side="left", padx=(18, 6))
-        ttk.Button(top, text="Publish Now", command=self.publish_now).pack(side="left")
-        ttk.Button(top, text="Export CSV", command=self.export_csv).pack(side="left", padx=(18, 6))
-        ttk.Button(top, text="Export KML", command=self.export_kml).pack(side="left")
-        self.cutdown_btn = ttk.Button(top, text="Send Cutdown", command=self.send_cutdown_command, state="disabled")
-        self.cutdown_btn.pack(side="left", padx=(18, 0))
-        ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=18)
+        self.add_top_menu(top, "Map", (("Open Live Map", self.open_map), ("Choose Public Folder", self.choose_public_dir)))
+        self.add_top_menu(top, "Export", (("Export CSV", self.export_csv), ("Export KML", self.export_kml)))
+        self.add_top_menu(top, "Publish", (("Publish Now", self.publish_now), ("Save Settings", self.save_settings)))
 
         panes = ttk.Panedwindow(root, orient="horizontal")
         panes.pack(fill="both", expand=True, pady=(10, 0))
@@ -345,10 +342,21 @@ class GroundStationApp(tk.Tk):
 
         left = ttk.Frame(panes)
         right = ttk.Frame(panes)
-        right.configure(width=380)
+        right.configure(width=420)
         panes.add(left, weight=3)
         panes.add(right, weight=1)
         self.right_panel = right
+
+        cutdown_box = ttk.LabelFrame(right, text="Cutdown", padding=10)
+        cutdown_box.pack(fill="x")
+        self.cutdown_side_btn = ttk.Button(
+            cutdown_box,
+            text="Send Cutdown",
+            command=self.send_cutdown_command,
+            state="disabled",
+        )
+        self.cutdown_side_btn.pack(fill="x")
+        ttk.Label(cutdown_box, textvariable=self.cutdown_ack_var, wraplength=360, justify="left").pack(fill="x", pady=(8, 0))
 
         columns = CSV_FIELDS
         self.table = ttk.Treeview(left, columns=columns, show="headings", height=24)
@@ -375,7 +383,7 @@ class GroundStationApp(tk.Tk):
         left.columnconfigure(0, weight=1)
 
         telemetry = ttk.LabelFrame(right, text="Live Telemetry", padding=10)
-        telemetry.pack(fill="x")
+        telemetry.pack(fill="x", pady=(10, 0))
         self.live_labels = {}
         for label in (
             "Lat",
@@ -448,6 +456,19 @@ class GroundStationApp(tk.Tk):
         self.public_dir_var = tk.StringVar(value=str(self.public_dir))
         ttk.Label(help_box, textvariable=self.public_dir_var, wraplength=300).pack(fill="x")
 
+        status_bar = ttk.Frame(root)
+        status_bar.pack(fill="x", pady=(8, 0))
+        ttk.Label(status_bar, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
+
+    def add_top_menu(self, parent, label, items):
+        button = ttk.Menubutton(parent, text=label)
+        menu = tk.Menu(button, tearoff=False)
+        for item_label, command in items:
+            menu.add_command(label=item_label, command=command)
+        button.configure(menu=menu)
+        button.pack(side="left", padx=(12, 0))
+        return button
+
     def enforce_panel_layout(self):
         try:
             total_width = self.panes.winfo_width()
@@ -481,14 +502,14 @@ class GroundStationApp(tk.Tk):
         self.reader = SerialReader(port, self.serial_queue, self.command_queue, self.stop_event)
         self.reader.start()
         self.connect_btn.configure(text="Disconnect")
-        self.cutdown_btn.configure(state="normal")
+        self.cutdown_side_btn.configure(state="normal")
         self.status_var.set(f"Opening {port}")
 
     def disconnect(self):
         self.stop_event.set()
         self.reader = None
         self.connect_btn.configure(text="Connect")
-        self.cutdown_btn.configure(state="disabled")
+        self.cutdown_side_btn.configure(state="disabled")
         self.status_var.set("Disconnected")
 
     def send_cutdown_command(self):
@@ -507,6 +528,7 @@ class GroundStationApp(tk.Tk):
             return
 
         self.command_queue.put("CMD,CUTDOWN")
+        self.cutdown_ack_var.set("Waiting for ICARUS acknowledgement")
         self.status_var.set("Queued cutdown command")
 
     def process_serial_queue(self):
@@ -522,8 +544,17 @@ class GroundStationApp(tk.Tk):
                 self.status_var.set(value)
             elif kind == "raw":
                 if value.startswith("STATUS,CUTDOWN_SENT,"):
-                    sequence = value.rsplit(",", 1)[-1]
+                    parts = value.split(",")
+                    sequence = parts[2] if len(parts) > 2 else "?"
                     self.status_var.set(f"Cutdown command transmitted by ground Yellowstone, seq {sequence}")
+                    self.cutdown_ack_var.set(f"Ground transmitted cutdown seq {sequence}; waiting for ICARUS")
+                elif value.startswith("STATUS,ICARUS_ACK,"):
+                    parts = value.split(",")
+                    sequence = parts[2] if len(parts) > 2 else "?"
+                    accepted = parts[4] if len(parts) > 4 else "?"
+                    rssi = parts[6] if len(parts) > 6 else "?"
+                    self.status_var.set(f"ICARUS acknowledged cutdown seq {sequence}")
+                    self.cutdown_ack_var.set(f"ICARUS ack seq {sequence} | accepted {accepted} | RSSI {rssi} dBm")
                 elif value.startswith("STATUS,"):
                     self.status_var.set(value)
                 else:

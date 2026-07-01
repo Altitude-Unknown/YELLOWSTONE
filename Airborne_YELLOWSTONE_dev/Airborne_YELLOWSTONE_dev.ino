@@ -15,6 +15,12 @@
 #define TELEMETRY_INTERVAL_MS 8000
 #define SHERPA_BAUD 115200
 
+// Yellowstone routes the SHERPA UART through SAMD21 PB22/PB23:
+//   PB22 / package pin 37 / Arduino D30 = Serial5 TX
+//   PB23 / package pin 38 / Arduino D31 = Serial5 RX
+// The Feather M0 core's default Serial1 is PA10/PA11, not this connector.
+#define SHERPA_SERIAL Serial5
+
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
 
 // ---------------- GPS ----------------
@@ -34,6 +40,11 @@ const uint8_t FLAG_PRESSURE_VALID = 0x02;
 const uint16_t COMMAND_MAGIC = 0x5943; // "YC"
 const uint8_t COMMAND_VERSION = 1;
 const uint8_t COMMAND_TYPE_CUTDOWN = 1;
+const uint16_t ACK_MAGIC = 0x5941; // "YA"
+const uint8_t ACK_VERSION = 1;
+const uint8_t ACK_TYPE_ICARUS_CUTDOWN = 1;
+const uint8_t ACK_REPEAT_COUNT = 10;
+const uint16_t ACK_REPEAT_INTERVAL_MS = 700;
 char AIRBORNE_LOG_FILE[] = "AIRLOG3.CSV";
 
 struct Payload {
@@ -67,11 +78,26 @@ struct CommandPacket {
   uint16_t checksum;
 } __attribute__((packed));
 
+struct AckPacket {
+  uint16_t magic;
+  uint8_t version;
+  uint8_t ackType;
+  uint32_t sequence;
+  uint32_t acceptedCount;
+  uint16_t checksum;
+} __attribute__((packed));
+
 Payload txData;
 
 unsigned long lastSend = 0;
 uint32_t txPacketCount = 0;
 uint32_t lastCutdownSequence = 0;
+char sherpaLine[64];
+uint8_t sherpaLineLen = 0;
+AckPacket pendingAckPacket;
+bool ackTxPending = false;
+uint8_t ackRepeatsRemaining = 0;
+uint32_t nextAckTxMs = 0;
 uint8_t consecutiveGpsMisses = 0;
 uint8_t lastGpsSecond = 255;
 bool sdReady = false;
@@ -314,15 +340,112 @@ uint16_t commandChecksum(const CommandPacket &command) {
   return checksum;
 }
 
+uint16_t ackChecksum(const AckPacket &packet) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&packet);
+  uint16_t checksum = 0xB4B4;
+  for (size_t i = 0; i < sizeof(AckPacket) - sizeof(packet.checksum); i++) {
+    checksum = static_cast<uint16_t>((checksum << 6) | (checksum >> 10));
+    checksum ^= bytes[i];
+  }
+  return checksum;
+}
+
 bool validCommandPacket(const CommandPacket &command) {
   return command.magic == COMMAND_MAGIC &&
       command.version == COMMAND_VERSION &&
       command.checksum == commandChecksum(command);
 }
 
+bool parseIcarusAckLine(const char *line, uint32_t &sequence, uint32_t &acceptedCount) {
+  const char prefix[] = "ICARUS,ACK,";
+  const char middle[] = ",accepted,";
+  if (strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+
+  char *end = nullptr;
+  unsigned long parsedSequence = strtoul(line + sizeof(prefix) - 1, &end, 10);
+  if (end == line + sizeof(prefix) - 1) return false;
+  if (strncmp(end, middle, sizeof(middle) - 1) != 0) return false;
+
+  char *countEnd = nullptr;
+  unsigned long parsedCount = strtoul(end + sizeof(middle) - 1, &countEnd, 10);
+  if (countEnd == end + sizeof(middle) - 1 || *countEnd != '\0') return false;
+
+  sequence = static_cast<uint32_t>(parsedSequence);
+  acceptedCount = static_cast<uint32_t>(parsedCount);
+  return sequence != 0;
+}
+
+void queueIcarusAck(uint32_t sequence, uint32_t acceptedCount) {
+  pendingAckPacket.magic = ACK_MAGIC;
+  pendingAckPacket.version = ACK_VERSION;
+  pendingAckPacket.ackType = ACK_TYPE_ICARUS_CUTDOWN;
+  pendingAckPacket.sequence = sequence;
+  pendingAckPacket.acceptedCount = acceptedCount;
+  pendingAckPacket.checksum = ackChecksum(pendingAckPacket);
+  ackRepeatsRemaining = ACK_REPEAT_COUNT;
+  ackTxPending = true;
+  nextAckTxMs = millis();
+
+  Serial.print("ICARUS ack queued for ground: seq=");
+  Serial.print(sequence);
+  Serial.print(" accepted=");
+  Serial.println(acceptedCount);
+}
+
+void processSherpaLine(const char *line) {
+  Serial.print("SHERPA UART RX: ");
+  Serial.println(line);
+
+  uint32_t sequence = 0;
+  uint32_t acceptedCount = 0;
+  if (parseIcarusAckLine(line, sequence, acceptedCount)) {
+    queueIcarusAck(sequence, acceptedCount);
+  }
+}
+
+void pollSherpaUart() {
+  while (SHERPA_SERIAL.available()) {
+    char ch = static_cast<char>(SHERPA_SERIAL.read());
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      sherpaLine[sherpaLineLen] = '\0';
+      if (sherpaLineLen > 0) processSherpaLine(sherpaLine);
+      sherpaLineLen = 0;
+      continue;
+    }
+
+    if (sherpaLineLen < sizeof(sherpaLine) - 1) {
+      sherpaLine[sherpaLineLen++] = ch;
+    } else {
+      sherpaLineLen = 0;
+      Serial.println("SHERPA UART line too long");
+    }
+  }
+}
+
+void serviceIcarusAckTx() {
+  if (!ackTxPending || ackRepeatsRemaining == 0) return;
+  uint32_t now = millis();
+  if (now - nextAckTxMs >= 0x80000000UL) return;
+
+  rf95.send(reinterpret_cast<uint8_t *>(&pendingAckPacket), sizeof(pendingAckPacket));
+  rf95.waitPacketSent(2000);
+  ackRepeatsRemaining--;
+  nextAckTxMs = now + ACK_REPEAT_INTERVAL_MS;
+
+  Serial.print("ICARUS ack sent to ground: seq=");
+  Serial.print(pendingAckPacket.sequence);
+  Serial.print(" remaining=");
+  Serial.println(ackRepeatsRemaining);
+
+  if (ackRepeatsRemaining == 0) {
+    ackTxPending = false;
+  }
+}
+
 void forwardCutdownToSherpa(uint32_t sequence) {
-  Serial1.print("SHERPA,CUTDOWN,");
-  Serial1.println(sequence);
+  SHERPA_SERIAL.print("SHERPA,CUTDOWN,");
+  SHERPA_SERIAL.println(sequence);
 
   Serial.print("Command forwarded to SHERPA: CUTDOWN seq=");
   Serial.println(sequence);
@@ -371,7 +494,7 @@ void recoverGpsIfNeeded(bool freshGps, uint8_t gpsSecond) {
 // ---------------- Setup ----------------
 void setup() {
   Serial.begin(115200);
-  Serial1.begin(SHERPA_BAUD);
+  SHERPA_SERIAL.begin(SHERPA_BAUD);
 
   pinMode(RFM95_CS, OUTPUT);
   digitalWrite(RFM95_CS, HIGH);
@@ -410,9 +533,15 @@ void setup() {
 
 // ---------------- Loop ----------------
 void loop() {
+  pollSherpaUart();
+  serviceIcarusAckTx();
   pollGroundCommand();
 
-  if (millis() - lastSend < TELEMETRY_INTERVAL_MS) return;
+  if (millis() - lastSend < TELEMETRY_INTERVAL_MS) {
+    pollSherpaUart();
+    serviceIcarusAckTx();
+    return;
+  }
 
   bool freshGps = gps.getPVT(250);
   uint8_t fixType = gps.getFixType();
