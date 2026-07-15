@@ -68,7 +68,11 @@ EXPORT_FIELDS = CSV_FIELDS + [
     "distance_mi",
     "distance_nm",
     "bearing_deg_from_launch",
+    "altimeter_inhg",
+    "launch_name",
 ]
+
+SERIAL_COMMAND_TERMINATOR = "\r\n"
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -224,13 +228,18 @@ class SerialReader(threading.Thread):
                 command = self.command_queue.get_nowait()
             except queue.Empty:
                 return
-            ser.write((command.strip() + "\n").encode("utf-8"))
+            encoded = (command.strip() + SERIAL_COMMAND_TERMINATOR).encode("ascii")
+            written = ser.write(encoded)
             ser.flush()
-            self.out_queue.put(("status", f"Sent command: {command}"))
+            if written != len(encoded):
+                raise serial.SerialTimeoutException(
+                    f"Incomplete serial command write: {written} of {len(encoded)} bytes"
+                )
+            self.out_queue.put(("status", f"Sent command: {command} ({written} bytes)"))
 
     def run(self):
         try:
-            with serial.Serial(self.port, BAUD, timeout=0.5) as ser:
+            with serial.Serial(self.port, BAUD, timeout=0.5, write_timeout=2.0) as ser:
                 time.sleep(0.25)
                 ser.reset_input_buffer()
                 self.out_queue.put(("status", f"Connected to {self.port}"))
