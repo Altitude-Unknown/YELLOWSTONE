@@ -150,15 +150,16 @@ When a valid ground command is received, Airborne writes one ASCII line:
 
 ```text
 SHERPA,CUTDOWN,<sequence>
+SHERPA,PING,<sequence>
 ```
 
 Repeated LoRa command packets with the same sequence number are ignored after
 the first forward, so SHERPA should receive a single UART cutdown line per GUI
 command.
 
-When SHERPA reports that ICARUS acknowledged a cutdown sequence, Airborne
-queues a compact LoRa acknowledgement and repeats it for several seconds so
-Ground can receive it after finishing its cutdown transmit burst.
+Airborne records command events in `AIREVT.CSV`. It also returns separate LoRa
+acknowledgements when Airborne receives the command, SHERPA accepts it over
+UART, and ICARUS accepts it over ESP-NOW.
 
 ## SHERPA Cutdown Bridge
 
@@ -175,7 +176,8 @@ esp32:esp32:esp32c3:CDCOnBoot=cdc
 ```
 
 SHERPA listens to Airborne YELLOWSTONE over UART and forwards accepted cutdown
-commands to ICARUS over ESP-NOW on channel `1`.
+and ping commands to ICARUS over ESP-NOW on channel `1`. A ping follows the
+same communications path but cannot activate either cutdown output.
 
 USB debug messages include:
 
@@ -184,8 +186,8 @@ SHERPA,BOOT
 SHERPA,YELLOWSTONE_UART_READY
 SHERPA,READY,MAC,80:F1:B2:F0:1B:3C
 SHERPA,UART_RX,SHERPA,CUTDOWN,12347
-SHERPA,CUTDOWN_FORWARDED,12347,ok_delta,5,fail_delta,0
-SHERPA,ICARUS_ACK,seq,12347,accepted,1
+SHERPA,COMMAND_FORWARDED,CUTDOWN,12347,ok_delta,5,fail_delta,0
+SHERPA,ICARUS_ACK,command,CUTDOWN,seq,12347,status,1,detail,1
 SHERPA,HEARTBEAT,ms,12996,last_sequence,12347,espnow_ok,5,espnow_fail,0,last_ack_sequence,12347
 ```
 
@@ -219,8 +221,9 @@ Target:
 esp32:esp32:esp32c6:CDCOnBoot=cdc
 ```
 
-ICARUS listens for SHERPA ESP-NOW packets on channel `1`. When it receives a
-valid cutdown packet with a new sequence number, it drives:
+ICARUS listens for SHERPA ESP-NOW packets on channel `1`. Pings are
+acknowledged without changing output pins. When it receives a valid cutdown
+packet with a new sequence number, it drives:
 
 ```text
 GPIO10 -> main cutdown MOSFET
@@ -236,14 +239,14 @@ USB debug messages include:
 ```text
 ICARUS,BOOT
 ICARUS,READY,MAC,...
-ICARUS,CUTDOWN_RX,seq,12347,from,80:f1:b2:f0:1b:3c
-ICARUS,ACK_SENT,seq,12347,accepted,1
+ICARUS,COMMAND_RX,command,CUTDOWN,seq,12347,from,80:f1:b2:f0:1b:3c
+ICARUS,ACK_SENT,command,CUTDOWN,seq,12347,detail,1
 ICARUS,CUTDOWN_ACTIVE,seq,12347,duration_ms,8000
 ICARUS,CUTDOWN_COMPLETE,seq,12347
 ICARUS,HEARTBEAT,ms,12000,active,0,last_sequence,12347,rx,5,accepted,1,duplicates,4,rejected,0
 ```
 
-### ICARUS Acknowledgement Path
+### Command Trace and Acknowledgement Path
 
 After accepting a new cutdown sequence, ICARUS sends an ESP-NOW acknowledgement
 back toward SHERPA. The full return path is:
@@ -253,14 +256,29 @@ ICARUS -> ESP-NOW broadcast ack -> SHERPA -> UART -> Airborne
 Airborne -> repeated LoRa ack -> Ground -> USB STATUS line -> GUI
 ```
 
-Ground prints:
+Ground prints one line per confirmed hop:
 
 ```text
-STATUS,ICARUS_ACK,<sequence>,accepted,<count>,rssi,<rssi>
+STATUS,COMMAND_ACK,<CUTDOWN|PING>,<sequence>,stage,<AIRBORNE|SHERPA|ICARUS>,status,<status>,detail,<detail>,rssi,<rssi>
 ```
 
-The GUI displays this in the Cutdown panel as the confirmation that ICARUS
-received and accepted the cutdown command.
+The GUI displays the latest confirmed hop. An `ICARUS` acknowledgement with
+status `1` is an end-to-end software-path pass. For cutdown it confirms that
+ICARUS accepted the command and entered the output-activation path; it does not
+electrically prove current through the cutter.
+
+### End-to-End Ping
+
+Use the GUI's **Ping ICARUS** button, or send this to Ground over USB:
+
+```text
+CMD,PING
+```
+
+Expected hop order is `AIRBORNE`, `SHERPA`, then `ICARUS`. The first missing
+stage localizes the failed segment. Ground logs command transmission and all
+returned stages to `GNDEVT.CSV`; Airborne logs LoRa receive, UART forwarding,
+and returned stages to `AIREVT.CSV`.
 
 ### Flashing ICARUS
 
@@ -315,7 +333,9 @@ arduino-cli upload -p /dev/cu.usbmodem1101 --fqbn adafruit:samd:adafruit_feather
 - Print valid telemetry as CSV over USB serial.
 - Log valid telemetry to `GNDLOG3.CSV` when SD is available.
 - Accept `CMD,CUTDOWN` from the desktop GUI over USB serial.
+- Accept non-firing `CMD,PING` end-to-end link tests.
 - Transmit a short LoRa command packet to the airborne unit.
+- Log command transmissions and hop acknowledgements to `GNDEVT.CSV`.
 
 ### Ground Startup Messages
 
@@ -328,7 +348,7 @@ LoRa init failed
 Set freq failed
 Ground station ready
 LoRa ready: long-range mode
-STATUS,CUTDOWN_SENT,12
+STATUS,COMMAND_SENT,CUTDOWN,12,sent,12,timeouts,0
 ```
 
 ### Ground Serial CSV Format
@@ -351,14 +371,24 @@ The GUI sends cutdown requests to the Ground YELLOWSTONE as:
 CMD,CUTDOWN
 ```
 
+The non-firing end-to-end test is:
+
+```text
+CMD,PING
+```
+
 The ground board responds with:
 
 ```text
-STATUS,CUTDOWN_SENT,<sequence>
+STATUS,COMMAND_SENT,<CUTDOWN|PING>,<sequence>,sent,<count>,timeouts,<count>
 ```
 
 The ground board repeats the LoRa command packet three times for better receive
 odds, using the same sequence number each time.
+
+Airborne delays the first acknowledgement for five seconds. This turnaround
+window lets Ground finish its blocking SF12 transmit burst and return the radio
+to receive mode before acknowledgements begin.
 
 ### Pressure Telemetry Verification
 

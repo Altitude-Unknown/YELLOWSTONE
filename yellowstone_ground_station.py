@@ -290,6 +290,7 @@ class GroundStationApp(tk.Tk):
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Not connected")
         self.cutdown_ack_var = tk.StringVar(value="No ICARUS ack yet")
+        self.ping_status_var = tk.StringVar(value="No ping sent yet")
         self.map_status_var = tk.StringVar(value="No valid GPS point yet")
         self.netlify_site_var = tk.StringVar(value=self.settings.get("netlify_site_id", ""))
         self.netlify_token_var = tk.StringVar(value=self.settings.get("netlify_auth_token", ""))
@@ -366,6 +367,17 @@ class GroundStationApp(tk.Tk):
         )
         self.cutdown_side_btn.pack(fill="x")
         ttk.Label(cutdown_box, textvariable=self.cutdown_ack_var, wraplength=360, justify="left").pack(fill="x", pady=(8, 0))
+
+        ping_box = ttk.LabelFrame(right, text="End-to-End Link Test", padding=10)
+        ping_box.pack(fill="x", pady=(10, 0))
+        self.ping_side_btn = ttk.Button(
+            ping_box,
+            text="Ping ICARUS",
+            command=self.send_ping_command,
+            state="disabled",
+        )
+        self.ping_side_btn.pack(fill="x")
+        ttk.Label(ping_box, textvariable=self.ping_status_var, wraplength=360, justify="left").pack(fill="x", pady=(8, 0))
 
         columns = CSV_FIELDS
         self.table = ttk.Treeview(left, columns=columns, show="headings", height=24)
@@ -512,6 +524,7 @@ class GroundStationApp(tk.Tk):
         self.reader.start()
         self.connect_btn.configure(text="Disconnect")
         self.cutdown_side_btn.configure(state="normal")
+        self.ping_side_btn.configure(state="normal")
         self.status_var.set(f"Opening {port}")
 
     def disconnect(self):
@@ -519,6 +532,7 @@ class GroundStationApp(tk.Tk):
         self.reader = None
         self.connect_btn.configure(text="Connect")
         self.cutdown_side_btn.configure(state="disabled")
+        self.ping_side_btn.configure(state="disabled")
         self.status_var.set("Disconnected")
 
     def send_cutdown_command(self):
@@ -540,6 +554,14 @@ class GroundStationApp(tk.Tk):
         self.cutdown_ack_var.set("Waiting for ICARUS acknowledgement")
         self.status_var.set("Queued cutdown command")
 
+    def send_ping_command(self):
+        if not self.reader:
+            messagebox.showwarning(APP_TITLE, "Connect to the ground Yellowstone serial port first.")
+            return
+        self.command_queue.put("CMD,PING")
+        self.ping_status_var.set("Waiting: Ground → Airborne → SHERPA → ICARUS")
+        self.status_var.set("Queued end-to-end ping")
+
     def process_serial_queue(self):
         while True:
             try:
@@ -552,18 +574,31 @@ class GroundStationApp(tk.Tk):
             elif kind == "status":
                 self.status_var.set(value)
             elif kind == "raw":
-                if value.startswith("STATUS,CUTDOWN_SENT,"):
+                if value.startswith("STATUS,COMMAND_SENT,"):
                     parts = value.split(",")
-                    sequence = parts[2] if len(parts) > 2 else "?"
-                    self.status_var.set(f"Cutdown command transmitted by ground Yellowstone, seq {sequence}")
-                    self.cutdown_ack_var.set(f"Ground transmitted cutdown seq {sequence}; waiting for ICARUS")
-                elif value.startswith("STATUS,ICARUS_ACK,"):
+                    command = parts[2] if len(parts) > 2 else "?"
+                    sequence = parts[3] if len(parts) > 3 else "?"
+                    sent = parts[5] if len(parts) > 5 else "?"
+                    self.status_var.set(f"{command} seq {sequence}: ground transmitted {sent} copies")
+                    if command == "CUTDOWN":
+                        self.cutdown_ack_var.set(f"CUTDOWN seq {sequence}: waiting for hop acknowledgements")
+                    elif command == "PING":
+                        self.ping_status_var.set(f"PING seq {sequence}: ground sent; waiting for Airborne")
+                elif value.startswith("STATUS,COMMAND_ACK,"):
                     parts = value.split(",")
-                    sequence = parts[2] if len(parts) > 2 else "?"
-                    accepted = parts[4] if len(parts) > 4 else "?"
-                    rssi = parts[6] if len(parts) > 6 else "?"
-                    self.status_var.set(f"ICARUS acknowledged cutdown seq {sequence}")
-                    self.cutdown_ack_var.set(f"ICARUS ack seq {sequence} | accepted {accepted} | RSSI {rssi} dBm")
+                    command = parts[2] if len(parts) > 2 else "?"
+                    sequence = parts[3] if len(parts) > 3 else "?"
+                    stage = parts[5] if len(parts) > 5 else "?"
+                    status = parts[7] if len(parts) > 7 else "?"
+                    rssi = parts[11] if len(parts) > 11 else "?"
+                    message = f"{command} seq {sequence}: {stage} ack status {status} | LoRa RSSI {rssi} dBm"
+                    self.status_var.set(message)
+                    if command == "CUTDOWN":
+                        self.cutdown_ack_var.set(message)
+                    elif command == "PING":
+                        if stage == "ICARUS" and status == "1":
+                            message = f"PING seq {sequence}: END-TO-END PASS through ICARUS | RSSI {rssi} dBm"
+                        self.ping_status_var.set(message)
                 elif value.startswith("STATUS,"):
                     self.status_var.set(value)
                 else:

@@ -63,6 +63,19 @@ class GroundStationTests(unittest.TestCase):
         self.assertTrue(fake.flushed)
         self.assertEqual(output.get_nowait(), ("status", f"Sent command: CMD,CUTDOWN ({len(expected)} bytes)"))
 
+    def test_ping_command_uses_same_serial_transport(self):
+        commands = queue.Queue()
+        output = queue.Queue()
+        commands.put("CMD,PING")
+        reader = SerialReader("test", output, commands, None)
+        fake = FakeSerial()
+
+        reader.write_pending_commands(fake)
+
+        expected = f"CMD,PING{SERIAL_COMMAND_TERMINATOR}".encode("ascii")
+        self.assertEqual(bytes(fake.data), expected)
+        self.assertTrue(fake.flushed)
+
 
 if __name__ == "__main__":
     unittest.main()

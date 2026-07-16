@@ -13,6 +13,7 @@
 const uint32_t ICARUS_MAGIC = 0x49535543UL; // "ICUS"
 const uint8_t ICARUS_VERSION = 1;
 const uint8_t ICARUS_COMMAND_CUTDOWN = 1;
+const uint8_t ICARUS_COMMAND_PING = 2;
 const uint8_t ICARUS_MESSAGE_ACK = 2;
 const uint8_t ESPNOW_CHANNEL = 1;
 const uint32_t CUTDOWN_BURN_MS = 8000;
@@ -35,8 +36,10 @@ struct IcarusAckPacket {
   uint32_t magic;
   uint8_t version;
   uint8_t message;
+  uint8_t command;
+  uint8_t status;
   uint32_t sequence;
-  uint32_t acceptedCount;
+  uint32_t detail;
   uint16_t checksum;
 } __attribute__((packed));
 
@@ -44,7 +47,9 @@ volatile bool pendingCutdown = false;
 volatile bool pendingAck = false;
 volatile uint32_t pendingSequence = 0;
 volatile uint32_t pendingAckSequence = 0;
+volatile uint8_t pendingAckCommand = 0;
 uint32_t lastAcceptedSequence = 0;
+uint32_t lastPingSequence = 0;
 uint32_t cutdownStartedMs = 0;
 uint32_t lastHeartbeatMs = 0;
 uint32_t rxPacketCount = 0;
@@ -85,7 +90,7 @@ void setCutdownOutputs(bool on) {
 bool validPacket(const IcarusCommandPacket &packet) {
   return packet.magic == ICARUS_MAGIC &&
       packet.version == ICARUS_VERSION &&
-      packet.command == ICARUS_COMMAND_CUTDOWN &&
+      (packet.command == ICARUS_COMMAND_CUTDOWN || packet.command == ICARUS_COMMAND_PING) &&
       packet.sequence != 0 &&
       packet.checksum == packetChecksum(packet);
 }
@@ -113,19 +118,29 @@ void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int l
     return;
   }
 
-  if (packet.sequence == lastAcceptedSequence || packet.sequence == pendingSequence) {
+  uint32_t lastSequence = packet.command == ICARUS_COMMAND_CUTDOWN
+      ? lastAcceptedSequence : lastPingSequence;
+  if (packet.sequence == lastSequence ||
+      (packet.command == ICARUS_COMMAND_CUTDOWN && packet.sequence == pendingSequence)) {
     duplicatePacketCount++;
     return;
   }
 
-  lastAcceptedSequence = packet.sequence;
-  pendingSequence = packet.sequence;
+  if (packet.command == ICARUS_COMMAND_CUTDOWN) {
+    lastAcceptedSequence = packet.sequence;
+    pendingSequence = packet.sequence;
+    pendingCutdown = true;
+    acceptedPacketCount++;
+  } else {
+    lastPingSequence = packet.sequence;
+  }
   pendingAckSequence = packet.sequence;
-  pendingCutdown = true;
+  pendingAckCommand = packet.command;
   pendingAck = true;
-  acceptedPacketCount++;
 
-  Serial.print("ICARUS,CUTDOWN_RX,seq,");
+  Serial.print("ICARUS,COMMAND_RX,command,");
+  Serial.print(packet.command == ICARUS_COMMAND_CUTDOWN ? "CUTDOWN" : "PING");
+  Serial.print(",seq,");
   Serial.print(packet.sequence);
   Serial.print(",from,");
   printMac(info->src_addr);
@@ -162,13 +177,15 @@ bool initEspNow() {
   return true;
 }
 
-void sendAckToSherpa(uint32_t sequence) {
+void sendAckToSherpa(uint8_t command, uint32_t sequence) {
   IcarusAckPacket packet;
   packet.magic = ICARUS_MAGIC;
   packet.version = ICARUS_VERSION;
   packet.message = ICARUS_MESSAGE_ACK;
+  packet.command = command;
+  packet.status = 1;
   packet.sequence = sequence;
-  packet.acceptedCount = acceptedPacketCount;
+  packet.detail = command == ICARUS_COMMAND_CUTDOWN ? acceptedPacketCount : rxPacketCount;
   packet.checksum = ackChecksum(packet);
 
   for (uint8_t i = 0; i < ACK_REPEAT_COUNT; i++) {
@@ -176,10 +193,12 @@ void sendAckToSherpa(uint32_t sequence) {
     delay(ACK_REPEAT_DELAY_MS);
   }
 
-  Serial.print("ICARUS,ACK_SENT,seq,");
+  Serial.print("ICARUS,ACK_SENT,command,");
+  Serial.print(command == ICARUS_COMMAND_CUTDOWN ? "CUTDOWN" : "PING");
+  Serial.print(",seq,");
   Serial.print(sequence);
-  Serial.print(",accepted,");
-  Serial.println(acceptedPacketCount);
+  Serial.print(",detail,");
+  Serial.println(packet.detail);
 }
 
 void startCutdown(uint32_t sequence) {
@@ -251,20 +270,21 @@ void setup() {
 }
 
 void loop() {
-  if (pendingAck) {
-    noInterrupts();
-    uint32_t sequence = pendingAckSequence;
-    pendingAck = false;
-    interrupts();
-    sendAckToSherpa(sequence);
-  }
-
   if (pendingCutdown) {
     noInterrupts();
     uint32_t sequence = pendingSequence;
     pendingCutdown = false;
     interrupts();
     startCutdown(sequence);
+  }
+
+  if (pendingAck) {
+    noInterrupts();
+    uint32_t sequence = pendingAckSequence;
+    uint8_t command = pendingAckCommand;
+    pendingAck = false;
+    interrupts();
+    sendAckToSherpa(command, sequence);
   }
 
   updateCutdownWindow();

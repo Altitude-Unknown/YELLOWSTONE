@@ -17,13 +17,17 @@ const uint8_t FLAG_PRESSURE_VALID = 0x02;
 const uint16_t COMMAND_MAGIC = 0x5943; // "YC"
 const uint8_t COMMAND_VERSION = 1;
 const uint8_t COMMAND_TYPE_CUTDOWN = 1;
+const uint8_t COMMAND_TYPE_PING = 2;
 const uint16_t ACK_MAGIC = 0x5941; // "YA"
-const uint8_t ACK_VERSION = 1;
-const uint8_t ACK_TYPE_ICARUS_CUTDOWN = 1;
-const uint8_t COMMAND_REPEAT_COUNT = 12;
+const uint8_t ACK_VERSION = 2;
+const uint8_t ACK_STAGE_AIRBORNE = 1;
+const uint8_t ACK_STAGE_SHERPA = 2;
+const uint8_t ACK_STAGE_ICARUS = 3;
+const uint8_t COMMAND_REPEAT_COUNT = 3;
 const uint16_t COMMAND_REPEAT_DELAY_MS = 250;
 const uint16_t COMMAND_TX_TIMEOUT_MS = 5000;
 char GROUND_LOG_FILE[] = "GNDLOG.CSV";
+char GROUND_EVENT_FILE[] = "GNDEVT.CSV";
 
 struct Payload {
   uint16_t magic;
@@ -59,9 +63,11 @@ struct CommandPacket {
 struct AckPacket {
   uint16_t magic;
   uint8_t version;
-  uint8_t ackType;
+  uint8_t command;
+  uint8_t stage;
+  uint8_t status;
   uint32_t sequence;
-  uint32_t acceptedCount;
+  uint32_t detail;
   uint16_t checksum;
 } __attribute__((packed));
 
@@ -72,6 +78,41 @@ uint32_t commandSequence = 0;
 char serialCommandLine[40];
 uint8_t serialCommandLen = 0;
 bool sdReady = false;
+
+const char *commandName(uint8_t command) {
+  if (command == COMMAND_TYPE_CUTDOWN) return "CUTDOWN";
+  if (command == COMMAND_TYPE_PING) return "PING";
+  return "UNKNOWN";
+}
+
+const char *stageName(uint8_t stage) {
+  if (stage == ACK_STAGE_AIRBORNE) return "AIRBORNE";
+  if (stage == ACK_STAGE_SHERPA) return "SHERPA";
+  if (stage == ACK_STAGE_ICARUS) return "ICARUS";
+  return "UNKNOWN";
+}
+
+void logGroundEvent(const char *event, uint8_t command, uint32_t sequence,
+                    const char *stage, uint32_t value) {
+  if (!sdReady) return;
+  File logFile = SD.open(GROUND_EVENT_FILE, FILE_WRITE);
+  if (!logFile) {
+    Serial.println("STATUS,GROUND_EVENT_LOG_FAILED");
+    return;
+  }
+  logFile.print(millis());
+  logFile.print(",");
+  logFile.print(event);
+  logFile.print(",");
+  logFile.print(commandName(command));
+  logFile.print(",");
+  logFile.print(sequence);
+  logFile.print(",");
+  logFile.print(stage);
+  logFile.print(",");
+  logFile.println(value);
+  logFile.close();
+}
 
 void configureLoRaLongRange() {
   rf95.setFrequency(RF95_FREQ);
@@ -193,18 +234,17 @@ uint16_t ackChecksum(const AckPacket &packet) {
 bool validAckPacket(const AckPacket &packet) {
   return packet.magic == ACK_MAGIC &&
       packet.version == ACK_VERSION &&
-      packet.ackType == ACK_TYPE_ICARUS_CUTDOWN &&
+      (packet.command == COMMAND_TYPE_CUTDOWN || packet.command == COMMAND_TYPE_PING) &&
+      packet.stage >= ACK_STAGE_AIRBORNE && packet.stage <= ACK_STAGE_ICARUS &&
       packet.sequence != 0 &&
       packet.checksum == ackChecksum(packet);
 }
 
-void sendCutdownCommand() {
-  // Ground sends the cutdown command over LoRa only. Airborne YELLOWSTONE
-  // forwards accepted commands to SHERPA over its PB22/PB23 Serial5 UART.
+void sendCommand(uint8_t commandType) {
   CommandPacket command;
   command.magic = COMMAND_MAGIC;
   command.version = COMMAND_VERSION;
-  command.command = COMMAND_TYPE_CUTDOWN;
+  command.command = commandType;
   uint32_t uptimeSequence = millis();
   if (uptimeSequence > commandSequence) {
     commandSequence = uptimeSequence;
@@ -214,6 +254,7 @@ void sendCutdownCommand() {
   if (commandSequence == 0) commandSequence = 1;
   command.sequence = commandSequence;
   command.checksum = commandChecksum(command);
+  logGroundEvent("TX_REQUEST", commandType, command.sequence, "GROUND", 0);
 
   uint8_t sentCount = 0;
   uint8_t timeoutCount = 0;
@@ -234,17 +275,24 @@ void sendCutdownCommand() {
     delay(COMMAND_REPEAT_DELAY_MS);
   }
 
-  Serial.print("STATUS,CUTDOWN_SENT,");
+  Serial.print("STATUS,COMMAND_SENT,");
+  Serial.print(commandName(commandType));
+  Serial.print(",");
   Serial.print(command.sequence);
   Serial.print(",sent,");
   Serial.print(sentCount);
   Serial.print(",timeouts,");
   Serial.println(timeoutCount);
+  logGroundEvent("TX_COMPLETE", commandType, command.sequence, "GROUND", sentCount);
 }
 
 void processSerialCommand(const char *line) {
   if (strcmp(line, "CMD,CUTDOWN") == 0) {
-    sendCutdownCommand();
+    sendCommand(COMMAND_TYPE_CUTDOWN);
+    return;
+  }
+  if (strcmp(line, "CMD,PING") == 0) {
+    sendCommand(COMMAND_TYPE_PING);
     return;
   }
 
@@ -287,6 +335,14 @@ void initGroundLog() {
     if (logFile) {
       logFile.println("lat,lon,gps_alt_m,gps_alt_ft,ground_speed_mps,ground_speed_mph,vertical_speed_mps,vertical_speed_fpm,heading_deg,pressure_pa,pressure_hpa,pressure_inhg,pressure_alt_m,pressure_alt_ft,pressure_temp_c,pressure_temp_f,rssi,packet,date_utc,time_utc,fix_type,sats,gps_valid,pressure_valid");
       logFile.close();
+    }
+  }
+
+  if (!SD.exists(GROUND_EVENT_FILE)) {
+    File eventFile = SD.open(GROUND_EVENT_FILE, FILE_WRITE);
+    if (eventFile) {
+      eventFile.println("millis,event,command,sequence,stage,value");
+      eventFile.close();
     }
   }
 
@@ -343,12 +399,19 @@ void loop() {
       return;
     }
 
-    Serial.print("STATUS,ICARUS_ACK,");
+    Serial.print("STATUS,COMMAND_ACK,");
+    Serial.print(commandName(ack.command));
+    Serial.print(",");
     Serial.print(ack.sequence);
-    Serial.print(",accepted,");
-    Serial.print(ack.acceptedCount);
+    Serial.print(",stage,");
+    Serial.print(stageName(ack.stage));
+    Serial.print(",status,");
+    Serial.print(ack.status);
+    Serial.print(",detail,");
+    Serial.print(ack.detail);
     Serial.print(",rssi,");
     Serial.println(rf95.lastRssi());
+    logGroundEvent("ACK_RX", ack.command, ack.sequence, stageName(ack.stage), ack.status);
     return;
   }
 

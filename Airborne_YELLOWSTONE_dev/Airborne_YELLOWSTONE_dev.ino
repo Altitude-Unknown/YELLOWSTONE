@@ -40,12 +40,17 @@ const uint8_t FLAG_PRESSURE_VALID = 0x02;
 const uint16_t COMMAND_MAGIC = 0x5943; // "YC"
 const uint8_t COMMAND_VERSION = 1;
 const uint8_t COMMAND_TYPE_CUTDOWN = 1;
+const uint8_t COMMAND_TYPE_PING = 2;
 const uint16_t ACK_MAGIC = 0x5941; // "YA"
-const uint8_t ACK_VERSION = 1;
-const uint8_t ACK_TYPE_ICARUS_CUTDOWN = 1;
-const uint8_t ACK_REPEAT_COUNT = 10;
+const uint8_t ACK_VERSION = 2;
+const uint8_t ACK_STAGE_AIRBORNE = 1;
+const uint8_t ACK_STAGE_SHERPA = 2;
+const uint8_t ACK_STAGE_ICARUS = 3;
+const uint8_t ACK_REPEAT_COUNT = 3;
 const uint16_t ACK_REPEAT_INTERVAL_MS = 700;
+const uint16_t ACK_TURNAROUND_DELAY_MS = 5000;
 char AIRBORNE_LOG_FILE[] = "AIRLOG3.CSV";
+char AIRBORNE_EVENT_FILE[] = "AIREVT.CSV";
 
 struct Payload {
   uint16_t magic;
@@ -81,9 +86,11 @@ struct CommandPacket {
 struct AckPacket {
   uint16_t magic;
   uint8_t version;
-  uint8_t ackType;
+  uint8_t command;
+  uint8_t stage;
+  uint8_t status;
   uint32_t sequence;
-  uint32_t acceptedCount;
+  uint32_t detail;
   uint16_t checksum;
 } __attribute__((packed));
 
@@ -92,11 +99,18 @@ Payload txData;
 unsigned long lastSend = 0;
 uint32_t txPacketCount = 0;
 uint32_t lastCutdownSequence = 0;
+uint32_t lastPingSequence = 0;
 char sherpaLine[64];
 uint8_t sherpaLineLen = 0;
-AckPacket pendingAckPacket;
-bool ackTxPending = false;
-uint8_t ackRepeatsRemaining = 0;
+struct QueuedAck {
+  AckPacket packet;
+  uint8_t repeatsRemaining;
+};
+const uint8_t ACK_QUEUE_SIZE = 8;
+QueuedAck ackQueue[ACK_QUEUE_SIZE];
+uint8_t ackQueueHead = 0;
+uint8_t ackQueueTail = 0;
+uint8_t ackQueueCount = 0;
 uint32_t nextAckTxMs = 0;
 uint8_t consecutiveGpsMisses = 0;
 uint8_t lastGpsSecond = 255;
@@ -272,6 +286,34 @@ void logAirborneTelemetry(const Payload &data, uint32_t packetNumber) {
   logFile.close();
 }
 
+const char *commandName(uint8_t command) {
+  if (command == COMMAND_TYPE_CUTDOWN) return "CUTDOWN";
+  if (command == COMMAND_TYPE_PING) return "PING";
+  return "UNKNOWN";
+}
+
+void logAirborneEvent(const char *event, uint8_t command, uint32_t sequence,
+                      const char *stage, uint32_t value) {
+  if (!sdReady) return;
+  File logFile = SD.open(AIRBORNE_EVENT_FILE, FILE_WRITE);
+  if (!logFile) {
+    Serial.println("Airborne event log open failed");
+    return;
+  }
+  logFile.print(millis());
+  logFile.print(",");
+  logFile.print(event);
+  logFile.print(",");
+  logFile.print(commandName(command));
+  logFile.print(",");
+  logFile.print(sequence);
+  logFile.print(",");
+  logFile.print(stage);
+  logFile.print(",");
+  logFile.println(value);
+  logFile.close();
+}
+
 void initAirborneLog() {
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
@@ -287,6 +329,14 @@ void initAirborneLog() {
     if (logFile) {
       logFile.println("lat,lon,gps_alt_m,gps_alt_ft,ground_speed_mps,ground_speed_mph,vertical_speed_mps,vertical_speed_fpm,heading_deg,pressure_pa,pressure_hpa,pressure_inhg,pressure_alt_m,pressure_alt_ft,pressure_temp_c,pressure_temp_f,packet,date_utc,time_utc,fix_type,sats,gps_valid,pressure_valid");
       logFile.close();
+    }
+  }
+
+  if (!SD.exists(AIRBORNE_EVENT_FILE)) {
+    File eventFile = SD.open(AIRBORNE_EVENT_FILE, FILE_WRITE);
+    if (eventFile) {
+      eventFile.println("millis,event,command,sequence,stage,value");
+      eventFile.close();
     }
   }
 
@@ -353,53 +403,79 @@ uint16_t ackChecksum(const AckPacket &packet) {
 bool validCommandPacket(const CommandPacket &command) {
   return command.magic == COMMAND_MAGIC &&
       command.version == COMMAND_VERSION &&
+      (command.command == COMMAND_TYPE_CUTDOWN || command.command == COMMAND_TYPE_PING) &&
       command.checksum == commandChecksum(command);
 }
 
-bool parseIcarusAckLine(const char *line, uint32_t &sequence, uint32_t &acceptedCount) {
-  const char prefix[] = "ICARUS,ACK,";
-  const char middle[] = ",accepted,";
-  if (strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
-
-  char *end = nullptr;
-  unsigned long parsedSequence = strtoul(line + sizeof(prefix) - 1, &end, 10);
-  if (end == line + sizeof(prefix) - 1) return false;
-  if (strncmp(end, middle, sizeof(middle) - 1) != 0) return false;
-
-  char *countEnd = nullptr;
-  unsigned long parsedCount = strtoul(end + sizeof(middle) - 1, &countEnd, 10);
-  if (countEnd == end + sizeof(middle) - 1 || *countEnd != '\0') return false;
-
-  sequence = static_cast<uint32_t>(parsedSequence);
-  acceptedCount = static_cast<uint32_t>(parsedCount);
-  return sequence != 0;
+uint8_t parseCommandName(const char *name) {
+  if (strcmp(name, "CUTDOWN") == 0) return COMMAND_TYPE_CUTDOWN;
+  if (strcmp(name, "PING") == 0) return COMMAND_TYPE_PING;
+  return 0;
 }
 
-void queueIcarusAck(uint32_t sequence, uint32_t acceptedCount) {
-  pendingAckPacket.magic = ACK_MAGIC;
-  pendingAckPacket.version = ACK_VERSION;
-  pendingAckPacket.ackType = ACK_TYPE_ICARUS_CUTDOWN;
-  pendingAckPacket.sequence = sequence;
-  pendingAckPacket.acceptedCount = acceptedCount;
-  pendingAckPacket.checksum = ackChecksum(pendingAckPacket);
-  ackRepeatsRemaining = ACK_REPEAT_COUNT;
-  ackTxPending = true;
-  nextAckTxMs = millis();
+bool parseHopAckLine(const char *line, uint8_t &command, uint8_t &stage,
+                     uint32_t &sequence, uint8_t &status, uint32_t &detail) {
+  char source[9] = {};
+  char commandText[9] = {};
+  unsigned long parsedSequence = 0;
+  unsigned int parsedStatus = 0;
+  unsigned long parsedDetail = 0;
+  if (sscanf(line, "%8[^,],ACK,%8[^,],%lu,status,%u,detail,%lu",
+             source, commandText, &parsedSequence, &parsedStatus, &parsedDetail) != 5) return false;
+  command = parseCommandName(commandText);
+  if (command == 0 || parsedSequence == 0 || parsedStatus > 255) return false;
+  if (strcmp(source, "SHERPA") == 0) stage = ACK_STAGE_SHERPA;
+  else if (strcmp(source, "ICARUS") == 0) stage = ACK_STAGE_ICARUS;
+  else return false;
+  sequence = static_cast<uint32_t>(parsedSequence);
+  status = static_cast<uint8_t>(parsedStatus);
+  detail = static_cast<uint32_t>(parsedDetail);
+  return true;
+}
 
-  Serial.print("ICARUS ack queued for ground: seq=");
-  Serial.print(sequence);
-  Serial.print(" accepted=");
-  Serial.println(acceptedCount);
+void queueGroundAck(uint8_t command, uint8_t stage, uint32_t sequence,
+                    uint8_t status, uint32_t detail) {
+  if (ackQueueCount >= ACK_QUEUE_SIZE) {
+    Serial.println("ACK queue full");
+    logAirborneEvent("ACK_QUEUE_FULL", command, sequence, "AIRBORNE", stage);
+    return;
+  }
+  bool queueWasEmpty = ackQueueCount == 0;
+  QueuedAck &queued = ackQueue[ackQueueTail];
+  queued.packet.magic = ACK_MAGIC;
+  queued.packet.version = ACK_VERSION;
+  queued.packet.command = command;
+  queued.packet.stage = stage;
+  queued.packet.status = status;
+  queued.packet.sequence = sequence;
+  queued.packet.detail = detail;
+  queued.packet.checksum = ackChecksum(queued.packet);
+  queued.repeatsRemaining = ACK_REPEAT_COUNT;
+  ackQueueTail = (ackQueueTail + 1) % ACK_QUEUE_SIZE;
+  ackQueueCount++;
+  if (queueWasEmpty) nextAckTxMs = millis() + ACK_TURNAROUND_DELAY_MS;
+
+  Serial.print("ACK queued: command=");
+  Serial.print(commandName(command));
+  Serial.print(" stage=");
+  Serial.print(stage);
+  Serial.print(" seq=");
+  Serial.println(sequence);
 }
 
 void processSherpaLine(const char *line) {
   Serial.print("SHERPA UART RX: ");
   Serial.println(line);
 
+  uint8_t command = 0;
+  uint8_t stage = 0;
+  uint8_t status = 0;
   uint32_t sequence = 0;
-  uint32_t acceptedCount = 0;
-  if (parseIcarusAckLine(line, sequence, acceptedCount)) {
-    queueIcarusAck(sequence, acceptedCount);
+  uint32_t detail = 0;
+  if (parseHopAckLine(line, command, stage, sequence, status, detail)) {
+    logAirborneEvent("ACK_RX", command, sequence,
+                     stage == ACK_STAGE_SHERPA ? "SHERPA" : "ICARUS", status);
+    queueGroundAck(command, stage, sequence, status, detail);
   }
 }
 
@@ -424,31 +500,40 @@ void pollSherpaUart() {
 }
 
 void serviceIcarusAckTx() {
-  if (!ackTxPending || ackRepeatsRemaining == 0) return;
+  if (ackQueueCount == 0) return;
   uint32_t now = millis();
   if (now - nextAckTxMs >= 0x80000000UL) return;
 
-  rf95.send(reinterpret_cast<uint8_t *>(&pendingAckPacket), sizeof(pendingAckPacket));
+  QueuedAck &queued = ackQueue[ackQueueHead];
+  rf95.send(reinterpret_cast<uint8_t *>(&queued.packet), sizeof(queued.packet));
   rf95.waitPacketSent(2000);
-  ackRepeatsRemaining--;
+  queued.repeatsRemaining--;
   nextAckTxMs = now + ACK_REPEAT_INTERVAL_MS;
 
-  Serial.print("ICARUS ack sent to ground: seq=");
-  Serial.print(pendingAckPacket.sequence);
+  Serial.print("ACK sent to ground: seq=");
+  Serial.print(queued.packet.sequence);
   Serial.print(" remaining=");
-  Serial.println(ackRepeatsRemaining);
+  Serial.println(queued.repeatsRemaining);
 
-  if (ackRepeatsRemaining == 0) {
-    ackTxPending = false;
+  if (queued.repeatsRemaining == 0) {
+    logAirborneEvent("ACK_TX", queued.packet.command, queued.packet.sequence,
+                     "GROUND", queued.packet.stage);
+    ackQueueHead = (ackQueueHead + 1) % ACK_QUEUE_SIZE;
+    ackQueueCount--;
   }
 }
 
-void forwardCutdownToSherpa(uint32_t sequence) {
-  SHERPA_SERIAL.print("SHERPA,CUTDOWN,");
+void forwardCommandToSherpa(uint8_t command, uint32_t sequence) {
+  SHERPA_SERIAL.print("SHERPA,");
+  SHERPA_SERIAL.print(commandName(command));
+  SHERPA_SERIAL.print(",");
   SHERPA_SERIAL.println(sequence);
 
-  Serial.print("Command forwarded to SHERPA: CUTDOWN seq=");
+  Serial.print("Command forwarded to SHERPA: ");
+  Serial.print(commandName(command));
+  Serial.print(" seq=");
   Serial.println(sequence);
+  logAirborneEvent("UART_TX", command, sequence, "SHERPA", 1);
 }
 
 void pollGroundCommand() {
@@ -462,11 +547,14 @@ void pollGroundCommand() {
   CommandPacket command;
   memcpy(&command, buf, sizeof(command));
   if (!validCommandPacket(command)) return;
-  if (command.command != COMMAND_TYPE_CUTDOWN) return;
-  if (command.sequence == lastCutdownSequence) return;
+  uint32_t &lastSequence = command.command == COMMAND_TYPE_CUTDOWN
+      ? lastCutdownSequence : lastPingSequence;
+  if (command.sequence == lastSequence) return;
 
-  lastCutdownSequence = command.sequence;
-  forwardCutdownToSherpa(command.sequence);
+  lastSequence = command.sequence;
+  logAirborneEvent("LORA_RX", command.command, command.sequence, "GROUND", rf95.lastRssi());
+  queueGroundAck(command.command, ACK_STAGE_AIRBORNE, command.sequence, 1, rf95.lastRssi());
+  forwardCommandToSherpa(command.command, command.sequence);
 }
 
 void recoverGpsIfNeeded(bool freshGps, uint8_t gpsSecond) {

@@ -16,6 +16,7 @@
 const uint32_t ICARUS_MAGIC = 0x49535543UL; // "ICUS"
 const uint8_t ICARUS_VERSION = 1;
 const uint8_t ICARUS_COMMAND_CUTDOWN = 1;
+const uint8_t ICARUS_COMMAND_PING = 2;
 const uint8_t ICARUS_MESSAGE_ACK = 2;
 const uint8_t ESPNOW_CHANNEL = 1;
 const uint8_t ESPNOW_REPEATS = 5;
@@ -39,8 +40,10 @@ struct IcarusAckPacket {
   uint32_t magic;
   uint8_t version;
   uint8_t message;
+  uint8_t command;
+  uint8_t status;
   uint32_t sequence;
-  uint32_t acceptedCount;
+  uint32_t detail;
   uint16_t checksum;
 } __attribute__((packed));
 
@@ -49,11 +52,15 @@ uint8_t commandLineLen = 0;
 char usbLine[64];
 uint8_t usbLineLen = 0;
 uint32_t lastForwardedSequence = 0;
+uint32_t lastPingSequence = 0;
 uint32_t lastAckSequence = 0;
+uint8_t lastAckCommand = 0;
 uint32_t lastHeartbeatMs = 0;
 volatile bool pendingIcarusAck = false;
 volatile uint32_t pendingAckSequence = 0;
-volatile uint32_t pendingAckAcceptedCount = 0;
+volatile uint32_t pendingAckDetail = 0;
+volatile uint8_t pendingAckCommand = 0;
+volatile uint8_t pendingAckStatus = 0;
 volatile uint32_t espNowSendOk = 0;
 volatile uint32_t espNowSendFail = 0;
 
@@ -81,6 +88,7 @@ bool validAckPacket(const IcarusAckPacket &packet) {
   return packet.magic == ICARUS_MAGIC &&
       packet.version == ICARUS_VERSION &&
       packet.message == ICARUS_MESSAGE_ACK &&
+      (packet.command == ICARUS_COMMAND_CUTDOWN || packet.command == ICARUS_COMMAND_PING) &&
       packet.sequence != 0 &&
       packet.checksum == ackChecksum(packet);
 }
@@ -117,7 +125,9 @@ void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int l
   if (!validAckPacket(packet)) return;
 
   pendingAckSequence = packet.sequence;
-  pendingAckAcceptedCount = packet.acceptedCount;
+  pendingAckDetail = packet.detail;
+  pendingAckCommand = packet.command;
+  pendingAckStatus = packet.status;
   pendingIcarusAck = true;
 }
 
@@ -157,26 +167,43 @@ void forwardIcarusAckToYellowstone() {
 
   noInterrupts();
   uint32_t sequence = pendingAckSequence;
-  uint32_t acceptedCount = pendingAckAcceptedCount;
+  uint32_t detail = pendingAckDetail;
+  uint8_t command = pendingAckCommand;
+  uint8_t status = pendingAckStatus;
   pendingIcarusAck = false;
   interrupts();
 
-  if (sequence == 0 || sequence == lastAckSequence) return;
+  if (sequence == 0 || (sequence == lastAckSequence && command == lastAckCommand)) return;
   lastAckSequence = sequence;
+  lastAckCommand = command;
 
   YellowstoneSerial.print("ICARUS,ACK,");
+  YellowstoneSerial.print(command == ICARUS_COMMAND_CUTDOWN ? "CUTDOWN" : "PING");
+  YellowstoneSerial.print(",");
   YellowstoneSerial.print(sequence);
-  YellowstoneSerial.print(",accepted,");
-  YellowstoneSerial.println(acceptedCount);
+  YellowstoneSerial.print(",status,");
+  YellowstoneSerial.print(status);
+  YellowstoneSerial.print(",detail,");
+  YellowstoneSerial.println(detail);
 
-  Serial.print("SHERPA,ICARUS_ACK,seq,");
+  Serial.print("SHERPA,ICARUS_ACK,command,");
+  Serial.print(command == ICARUS_COMMAND_CUTDOWN ? "CUTDOWN" : "PING");
+  Serial.print(",seq,");
   Serial.print(sequence);
-  Serial.print(",accepted,");
-  Serial.println(acceptedCount);
+  Serial.print(",status,");
+  Serial.print(status);
+  Serial.print(",detail,");
+  Serial.println(detail);
 }
 
-void sendCutdownToIcarus(uint32_t sequence) {
-  if (sequence == 0 || sequence == lastForwardedSequence) {
+const char *commandName(uint8_t command) {
+  return command == ICARUS_COMMAND_CUTDOWN ? "CUTDOWN" : "PING";
+}
+
+void sendCommandToIcarus(uint8_t command, uint32_t sequence) {
+  uint32_t &lastSequence = command == ICARUS_COMMAND_CUTDOWN
+      ? lastForwardedSequence : lastPingSequence;
+  if (sequence == 0 || sequence == lastSequence) {
     Serial.print("SHERPA,IGNORED_DUPLICATE,");
     Serial.println(sequence);
     return;
@@ -185,11 +212,17 @@ void sendCutdownToIcarus(uint32_t sequence) {
   IcarusCommandPacket packet;
   packet.magic = ICARUS_MAGIC;
   packet.version = ICARUS_VERSION;
-  packet.command = ICARUS_COMMAND_CUTDOWN;
+  packet.command = command;
   packet.sequence = sequence;
   packet.checksum = packetChecksum(packet);
 
-  lastForwardedSequence = sequence;
+  lastSequence = sequence;
+
+  YellowstoneSerial.print("SHERPA,ACK,");
+  YellowstoneSerial.print(commandName(command));
+  YellowstoneSerial.print(",");
+  YellowstoneSerial.print(sequence);
+  YellowstoneSerial.println(",status,1,detail,0");
   uint32_t okBefore = espNowSendOk;
   uint32_t failBefore = espNowSendFail;
 
@@ -202,9 +235,11 @@ void sendCutdownToIcarus(uint32_t sequence) {
     delay(ESPNOW_REPEAT_DELAY_MS);
   }
 
-  blinkLed(LED_ARM_PIN, 2, 50);
+  if (command == ICARUS_COMMAND_CUTDOWN) blinkLed(LED_ARM_PIN, 2, 50);
 
-  Serial.print("SHERPA,CUTDOWN_FORWARDED,");
+  Serial.print("SHERPA,COMMAND_FORWARDED,");
+  Serial.print(commandName(command));
+  Serial.print(",");
   Serial.print(sequence);
   Serial.print(",ok_delta,");
   Serial.print(espNowSendOk - okBefore);
@@ -212,13 +247,23 @@ void sendCutdownToIcarus(uint32_t sequence) {
   Serial.println(espNowSendFail - failBefore);
 }
 
-bool parseCutdownLine(const char *line, uint32_t &sequence) {
-  const char prefix[] = "SHERPA,CUTDOWN,";
-  if (strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+bool parseCommandLine(const char *line, uint8_t &command, uint32_t &sequence) {
+  const char cutdownPrefix[] = "SHERPA,CUTDOWN,";
+  const char pingPrefix[] = "SHERPA,PING,";
+  const char *number = nullptr;
+  if (strncmp(line, cutdownPrefix, sizeof(cutdownPrefix) - 1) == 0) {
+    command = ICARUS_COMMAND_CUTDOWN;
+    number = line + sizeof(cutdownPrefix) - 1;
+  } else if (strncmp(line, pingPrefix, sizeof(pingPrefix) - 1) == 0) {
+    command = ICARUS_COMMAND_PING;
+    number = line + sizeof(pingPrefix) - 1;
+  } else {
+    return false;
+  }
 
   char *end = nullptr;
-  unsigned long parsed = strtoul(line + sizeof(prefix) - 1, &end, 10);
-  if (end == line + sizeof(prefix) - 1 || *end != '\0') return false;
+  unsigned long parsed = strtoul(number, &end, 10);
+  if (end == number || *end != '\0') return false;
   sequence = static_cast<uint32_t>(parsed);
   return sequence != 0;
 }
@@ -228,8 +273,9 @@ void processYellowstoneLine(const char *line) {
   Serial.println(line);
 
   uint32_t sequence = 0;
-  if (parseCutdownLine(line, sequence)) {
-    sendCutdownToIcarus(sequence);
+  uint8_t command = 0;
+  if (parseCommandLine(line, command, sequence)) {
+    sendCommandToIcarus(command, sequence);
     return;
   }
 
@@ -260,10 +306,11 @@ void readYellowstoneUart() {
 
 void processUsbLine(const char *line) {
   uint32_t sequence = 0;
-  if (parseCutdownLine(line, sequence)) {
+  uint8_t command = 0;
+  if (parseCommandLine(line, command, sequence)) {
     Serial.print("SHERPA,USB_TEST_RX,");
     Serial.println(line);
-    sendCutdownToIcarus(sequence);
+    sendCommandToIcarus(command, sequence);
     return;
   }
 
