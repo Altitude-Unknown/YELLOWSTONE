@@ -75,6 +75,12 @@ EXPORT_FIELDS = CSV_FIELDS + [
 SERIAL_COMMAND_TERMINATOR = "\r\n"
 
 
+def table_sash_position(total_width: int) -> int:
+    """Keep both the telemetry table and the sidebar visible."""
+    sidebar_width = min(420, max(340, total_width // 4))
+    return max(420, total_width - sidebar_width)
+
+
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
@@ -286,10 +292,12 @@ class GroundStationApp(tk.Tk):
         self.map_server = None
         self.map_server_thread = None
         self.map_server_port = MAP_SERVER_PORT
+        self._layout_attempts_remaining = 3
 
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Not connected")
         self.cutdown_ack_var = tk.StringVar(value="No ICARUS ack yet")
+        self.ping_status_var = tk.StringVar(value="No ping sent yet")
         self.map_status_var = tk.StringVar(value="No valid GPS point yet")
         self.netlify_site_var = tk.StringVar(value=self.settings.get("netlify_site_id", ""))
         self.netlify_token_var = tk.StringVar(value=self.settings.get("netlify_auth_token", ""))
@@ -341,6 +349,7 @@ class GroundStationApp(tk.Tk):
         ttk.Button(top, text="Refresh", command=self.refresh_ports).pack(side="left")
         self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection)
         self.connect_btn.pack(side="left", padx=6)
+        self.add_top_menu(top, "View", (("Reset Table Layout", self.reset_table_layout),))
         self.add_top_menu(top, "Map", (("Open Live Map", self.open_map), ("Choose Public Folder", self.choose_public_dir)))
         self.add_top_menu(top, "Export", (("Export CSV", self.export_csv), ("Export KML", self.export_kml)))
         self.add_top_menu(top, "Publish", (("Publish Now", self.publish_now), ("Save Settings", self.save_settings)))
@@ -366,6 +375,17 @@ class GroundStationApp(tk.Tk):
         )
         self.cutdown_side_btn.pack(fill="x")
         ttk.Label(cutdown_box, textvariable=self.cutdown_ack_var, wraplength=360, justify="left").pack(fill="x", pady=(8, 0))
+
+        ping_box = ttk.LabelFrame(right, text="End-to-End Link Test", padding=10)
+        ping_box.pack(fill="x", pady=(10, 0))
+        self.ping_side_btn = ttk.Button(
+            ping_box,
+            text="Ping ICARUS",
+            command=self.send_ping_command,
+            state="disabled",
+        )
+        self.ping_side_btn.pack(fill="x")
+        ttk.Label(ping_box, textvariable=self.ping_status_var, wraplength=360, justify="left").pack(fill="x", pady=(8, 0))
 
         columns = CSV_FIELDS
         self.table = ttk.Treeview(left, columns=columns, show="headings", height=24)
@@ -484,10 +504,28 @@ class GroundStationApp(tk.Tk):
             if total_width <= 0:
                 self.after(100, self.enforce_panel_layout)
                 return
-            right_width = min(420, max(340, total_width // 4))
-            self.panes.sashpos(0, max(420, total_width - right_width))
-        except Exception:
-            pass
+            self.panes.sashpos(0, table_sash_position(total_width))
+        except Exception as exc:
+            self.status_var.set(f"Could not position telemetry table: {exc}")
+        finally:
+            # Windows can report the initial widget size before DPI/layout
+            # negotiation completes. Retry only during startup so a user's
+            # later splitter adjustment remains intact.
+            if self._layout_attempts_remaining > 0:
+                self._layout_attempts_remaining -= 1
+                self.after(250, self.enforce_panel_layout)
+
+    def reset_table_layout(self):
+        """Restore the telemetry table if the splitter has collapsed it."""
+        self.update_idletasks()
+        try:
+            total_width = self.panes.winfo_width()
+            if total_width <= 0:
+                raise RuntimeError("window has not finished sizing")
+            self.panes.sashpos(0, table_sash_position(total_width))
+            self.status_var.set("Telemetry table layout reset")
+        except Exception as exc:
+            self.status_var.set(f"Could not reset telemetry table layout: {exc}")
 
     def refresh_ports(self):
         ports = [p.device for p in list_ports.comports()]
@@ -512,6 +550,7 @@ class GroundStationApp(tk.Tk):
         self.reader.start()
         self.connect_btn.configure(text="Disconnect")
         self.cutdown_side_btn.configure(state="normal")
+        self.ping_side_btn.configure(state="normal")
         self.status_var.set(f"Opening {port}")
 
     def disconnect(self):
@@ -519,6 +558,7 @@ class GroundStationApp(tk.Tk):
         self.reader = None
         self.connect_btn.configure(text="Connect")
         self.cutdown_side_btn.configure(state="disabled")
+        self.ping_side_btn.configure(state="disabled")
         self.status_var.set("Disconnected")
 
     def send_cutdown_command(self):
@@ -540,6 +580,14 @@ class GroundStationApp(tk.Tk):
         self.cutdown_ack_var.set("Waiting for ICARUS acknowledgement")
         self.status_var.set("Queued cutdown command")
 
+    def send_ping_command(self):
+        if not self.reader:
+            messagebox.showwarning(APP_TITLE, "Connect to the ground Yellowstone serial port first.")
+            return
+        self.command_queue.put("CMD,PING")
+        self.ping_status_var.set("Waiting: Ground → Airborne → SHERPA → ICARUS")
+        self.status_var.set("Queued end-to-end ping")
+
     def process_serial_queue(self):
         while True:
             try:
@@ -552,18 +600,31 @@ class GroundStationApp(tk.Tk):
             elif kind == "status":
                 self.status_var.set(value)
             elif kind == "raw":
-                if value.startswith("STATUS,CUTDOWN_SENT,"):
+                if value.startswith("STATUS,COMMAND_SENT,"):
                     parts = value.split(",")
-                    sequence = parts[2] if len(parts) > 2 else "?"
-                    self.status_var.set(f"Cutdown command transmitted by ground Yellowstone, seq {sequence}")
-                    self.cutdown_ack_var.set(f"Ground transmitted cutdown seq {sequence}; waiting for ICARUS")
-                elif value.startswith("STATUS,ICARUS_ACK,"):
+                    command = parts[2] if len(parts) > 2 else "?"
+                    sequence = parts[3] if len(parts) > 3 else "?"
+                    sent = parts[5] if len(parts) > 5 else "?"
+                    self.status_var.set(f"{command} seq {sequence}: ground transmitted {sent} copies")
+                    if command == "CUTDOWN":
+                        self.cutdown_ack_var.set(f"CUTDOWN seq {sequence}: waiting for hop acknowledgements")
+                    elif command == "PING":
+                        self.ping_status_var.set(f"PING seq {sequence}: ground sent; waiting for Airborne")
+                elif value.startswith("STATUS,COMMAND_ACK,"):
                     parts = value.split(",")
-                    sequence = parts[2] if len(parts) > 2 else "?"
-                    accepted = parts[4] if len(parts) > 4 else "?"
-                    rssi = parts[6] if len(parts) > 6 else "?"
-                    self.status_var.set(f"ICARUS acknowledged cutdown seq {sequence}")
-                    self.cutdown_ack_var.set(f"ICARUS ack seq {sequence} | accepted {accepted} | RSSI {rssi} dBm")
+                    command = parts[2] if len(parts) > 2 else "?"
+                    sequence = parts[3] if len(parts) > 3 else "?"
+                    stage = parts[5] if len(parts) > 5 else "?"
+                    status = parts[7] if len(parts) > 7 else "?"
+                    rssi = parts[11] if len(parts) > 11 else "?"
+                    message = f"{command} seq {sequence}: {stage} ack status {status} | LoRa RSSI {rssi} dBm"
+                    self.status_var.set(message)
+                    if command == "CUTDOWN":
+                        self.cutdown_ack_var.set(message)
+                    elif command == "PING":
+                        if stage == "ICARUS" and status == "1":
+                            message = f"PING seq {sequence}: END-TO-END PASS through ICARUS | RSSI {rssi} dBm"
+                        self.ping_status_var.set(message)
                 elif value.startswith("STATUS,"):
                     self.status_var.set(value)
                 else:

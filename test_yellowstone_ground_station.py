@@ -9,6 +9,7 @@ from yellowstone_ground_station import (
     SERIAL_COMMAND_TERMINATOR,
     SerialReader,
     TelemetryPoint,
+    table_sash_position,
 )
 
 
@@ -26,6 +27,10 @@ class FakeSerial:
 
 
 class GroundStationTests(unittest.TestCase):
+    def test_table_layout_keeps_a_visible_table_and_sidebar(self):
+        self.assertEqual(table_sash_position(1280), 940)
+        self.assertEqual(table_sash_position(980), 640)
+
     def test_export_fields_accept_complete_export_row(self):
         point = TelemetryPoint(
             46.0, -110.0, 1000, 3280.8, 1.0, 2.24, 0.5, 98.4, 90.0,
@@ -62,6 +67,19 @@ class GroundStationTests(unittest.TestCase):
         self.assertEqual(bytes(fake.data), expected)
         self.assertTrue(fake.flushed)
         self.assertEqual(output.get_nowait(), ("status", f"Sent command: CMD,CUTDOWN ({len(expected)} bytes)"))
+
+    def test_ping_command_uses_same_serial_transport(self):
+        commands = queue.Queue()
+        output = queue.Queue()
+        commands.put("CMD,PING")
+        reader = SerialReader("test", output, commands, None)
+        fake = FakeSerial()
+
+        reader.write_pending_commands(fake)
+
+        expected = f"CMD,PING{SERIAL_COMMAND_TERMINATOR}".encode("ascii")
+        self.assertEqual(bytes(fake.data), expected)
+        self.assertTrue(fake.flushed)
 
 
 if __name__ == "__main__":
