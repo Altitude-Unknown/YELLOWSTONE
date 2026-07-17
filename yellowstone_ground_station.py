@@ -75,6 +75,12 @@ EXPORT_FIELDS = CSV_FIELDS + [
 SERIAL_COMMAND_TERMINATOR = "\r\n"
 
 
+def table_sash_position(total_width: int) -> int:
+    """Keep both the telemetry table and the sidebar visible."""
+    sidebar_width = min(420, max(340, total_width // 4))
+    return max(420, total_width - sidebar_width)
+
+
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
@@ -286,6 +292,7 @@ class GroundStationApp(tk.Tk):
         self.map_server = None
         self.map_server_thread = None
         self.map_server_port = MAP_SERVER_PORT
+        self._layout_attempts_remaining = 3
 
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Not connected")
@@ -342,6 +349,7 @@ class GroundStationApp(tk.Tk):
         ttk.Button(top, text="Refresh", command=self.refresh_ports).pack(side="left")
         self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection)
         self.connect_btn.pack(side="left", padx=6)
+        self.add_top_menu(top, "View", (("Reset Table Layout", self.reset_table_layout),))
         self.add_top_menu(top, "Map", (("Open Live Map", self.open_map), ("Choose Public Folder", self.choose_public_dir)))
         self.add_top_menu(top, "Export", (("Export CSV", self.export_csv), ("Export KML", self.export_kml)))
         self.add_top_menu(top, "Publish", (("Publish Now", self.publish_now), ("Save Settings", self.save_settings)))
@@ -496,10 +504,28 @@ class GroundStationApp(tk.Tk):
             if total_width <= 0:
                 self.after(100, self.enforce_panel_layout)
                 return
-            right_width = min(420, max(340, total_width // 4))
-            self.panes.sashpos(0, max(420, total_width - right_width))
-        except Exception:
-            pass
+            self.panes.sashpos(0, table_sash_position(total_width))
+        except Exception as exc:
+            self.status_var.set(f"Could not position telemetry table: {exc}")
+        finally:
+            # Windows can report the initial widget size before DPI/layout
+            # negotiation completes. Retry only during startup so a user's
+            # later splitter adjustment remains intact.
+            if self._layout_attempts_remaining > 0:
+                self._layout_attempts_remaining -= 1
+                self.after(250, self.enforce_panel_layout)
+
+    def reset_table_layout(self):
+        """Restore the telemetry table if the splitter has collapsed it."""
+        self.update_idletasks()
+        try:
+            total_width = self.panes.winfo_width()
+            if total_width <= 0:
+                raise RuntimeError("window has not finished sizing")
+            self.panes.sashpos(0, table_sash_position(total_width))
+            self.status_var.set("Telemetry table layout reset")
+        except Exception as exc:
+            self.status_var.set(f"Could not reset telemetry table layout: {exc}")
 
     def refresh_ports(self):
         ports = [p.device for p in list_ports.comports()]
