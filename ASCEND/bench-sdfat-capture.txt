@@ -1,0 +1,8 @@
+opened /dev/cu.usbmodem1201
+SPI Hz: 400000
+SD init PASS
+Readback: ASCEND SdFat write/read PASS
+Write/read PASS
+      6262 U0000.CSV
+        30 CHECK.TXT
+        46 SDCHECK.TXT
