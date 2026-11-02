@@ -1,2 +1,0 @@
-opened /dev/cu.usbmodem1201
-Initializing SD card...initialization failed!
