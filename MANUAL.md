@@ -593,3 +593,8 @@ Update this manual whenever:
 - Netlify/live-map flow changes.
 - A new diagnostic sketch is added.
 - A board issue is fixed and becomes useful troubleshooting knowledge.
+
+## License
+
+Software and firmware: MIT ([LICENSE](LICENSE)). YELLOWSTONE hardware designs:
+CERN-OHL-P-2.0 ([LICENSE-HARDWARE](LICENSE-HARDWARE)). See [LICENSING.md](LICENSING.md).
